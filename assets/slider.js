@@ -3,11 +3,8 @@
     const treeRoot = document.getElementById('entityTree');
     const rootEntitySelect = document.getElementById('rootEntitySelect');
     const contactFieldSelect = document.getElementById('contactFieldSelect');
-    const selectedFiltersBox = document.getElementById('selectedFiltersBox');
-    const columnsHeaderRow = document.getElementById('columnsHeaderRow');
-    const columnsSourceRow = document.getElementById('columnsSourceRow');
-    const columnsSampleRow = document.getElementById('columnsSampleRow');
     const saveBtn = document.getElementById('saveTemplateBtn');
+    const openReportBtn = document.getElementById('openReportBtn');
     const templateNameInput = document.getElementById('templateNameInput');
     const formTitle = document.getElementById('sliderFormTitle');
     const relationMenuOverlayId = 'gncRelationMenuOverlay';
@@ -20,14 +17,12 @@
         templateId: cfg.templateId || '',
         metaCache: {},
         columnOrder: [],
-        filterFieldKeys: [],
         contactFieldCode: '',
         selectedRelations: {},
         expandedNodes: {},
         fieldSearch: {},
         pendingSearchFocus: null,
-        openRelationMenuNodeId: '',
-        dragKey: ''
+        openRelationMenuNodeId: ''
     };
 
     function request(action, payload) {
@@ -83,7 +78,6 @@
             clearTree();
             renderTree();
             renderColumns();
-            renderSelectedFilters();
         }).catch(showError);
     }
 
@@ -107,9 +101,6 @@
         clearTree();
         state.rootEntityCode = config.rootEntity;
         state.columnOrder = Array.isArray(config.columnOrder) ? config.columnOrder.map(String) : [];
-        state.filterFieldKeys = Array.isArray(config.filterFields)
-            ? config.filterFields.map(function (entry) { return String(entry.key || ''); }).filter(Boolean)
-            : [];
         state.contactFieldCode = String(config.contactFieldCode || state.contactFieldCode || '');
         renderRootSelect(state.rootEntityCode);
 
@@ -157,7 +148,6 @@
             refreshRootSpecialFieldSelectors();
             renderTree();
             renderColumns();
-            renderSelectedFilters();
         }).catch(showError);
     }
 
@@ -166,7 +156,6 @@
         state.nodes = {};
         state.rootNodeId = '';
         state.columnOrder = [];
-        state.filterFieldKeys = [];
         state.contactFieldCode = '';
         state.selectedRelations = {};
         state.expandedNodes = {};
@@ -260,28 +249,7 @@
             refreshRootSpecialFieldSelectors();
             renderTree();
             renderColumns();
-            renderSelectedFilters();
         }).catch(showError);
-    }
-
-    function getFieldKey(nodeId, fieldCode) {
-        return String(nodeId) + '::' + String(fieldCode);
-    }
-
-    function isFilterSelected(nodeId, fieldCode) {
-        return state.filterFieldKeys.indexOf(getFieldKey(nodeId, fieldCode)) >= 0;
-    }
-
-    function toggleFilterField(nodeId, fieldCode) {
-        const key = getFieldKey(nodeId, fieldCode);
-        const idx = state.filterFieldKeys.indexOf(key);
-        if (idx >= 0) {
-            state.filterFieldKeys.splice(idx, 1);
-        } else {
-            state.filterFieldKeys.push(key);
-        }
-        renderTree();
-        renderSelectedFilters();
     }
 
     function onFieldToggle(nodeId, fieldCode, checked) {
@@ -553,7 +521,6 @@
         Promise.all(addPromises).then(function () {
             renderTree();
             renderColumns();
-            renderSelectedFilters();
         }).catch(showError);
     }
 
@@ -573,9 +540,6 @@
         }
 
         delete state.nodes[nodeId];
-        state.filterFieldKeys = state.filterFieldKeys.filter(function (key) {
-            return key.indexOf(nodeId + '::') !== 0;
-        });
         delete state.selectedRelations[nodeId];
         delete state.expandedNodes[nodeId];
         if (state.openRelationMenuNodeId === nodeId) {
@@ -754,18 +718,6 @@
                 label.appendChild(checkbox);
                 label.appendChild(text);
                 item.appendChild(label);
-
-                const filterBtn = document.createElement('button');
-                filterBtn.type = 'button';
-                filterBtn.className = 'gnc-filter-toggle' + (isFilterSelected(node.id, field.code) ? ' is-active' : '');
-                filterBtn.title = 'Добавить поле в фильтры отчета';
-                filterBtn.textContent = '◦';
-                filterBtn.addEventListener('click', function (event) {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    toggleFilterField(node.id, field.code);
-                });
-                item.appendChild(filterBtn);
                 grid.appendChild(item);
             });
 
@@ -944,169 +896,13 @@
         });
     }
 
-    function moveColumnByDrag(fromKey, toKey) {
-        if (!fromKey || !toKey || fromKey === toKey) {
-            return;
-        }
-        const from = state.columnOrder.indexOf(fromKey);
-        const to = state.columnOrder.indexOf(toKey);
-        if (from < 0 || to < 0) {
-            return;
-        }
-
-        state.columnOrder.splice(from, 1);
-        state.columnOrder.splice(to, 0, fromKey);
-        renderColumns();
-    }
-
     function renderColumns() {
         const rows = getSelectedColumnRows();
         syncColumnOrder(rows);
-
-        const rowsByKey = {};
-        rows.forEach(function (row) {
-            rowsByKey[row.key] = row;
-        });
-
-        if (!rows.length) {
-            columnsHeaderRow.innerHTML = '<th class="gnc-empty" colspan="1">Пока не выбраны поля.</th>';
-            columnsSourceRow.innerHTML = '<td class="gnc-empty">Источник колонок появится после выбора полей.</td>';
-            columnsSampleRow.innerHTML = '<td class="gnc-empty">Пример строки таблицы.</td>';
-            return;
-        }
-
-        columnsHeaderRow.innerHTML = '';
-        columnsSourceRow.innerHTML = '';
-        columnsSampleRow.innerHTML = '';
-
-        state.columnOrder.forEach(function (key) {
-            const row = rowsByKey[key];
-            if (!row) {
-                return;
-            }
-
-            const th = document.createElement('th');
-            th.className = 'gnc-col-drag';
-            th.draggable = true;
-            th.dataset.key = key;
-            th.textContent = row.fieldTitle;
-
-            th.addEventListener('dragstart', function () {
-                state.dragKey = key;
-                th.classList.add('dragging');
-            });
-            th.addEventListener('dragover', function (e) {
-                e.preventDefault();
-                th.classList.add('drag-over');
-            });
-            th.addEventListener('dragleave', function () {
-                th.classList.remove('drag-over');
-            });
-            th.addEventListener('drop', function (e) {
-                e.preventDefault();
-                th.classList.remove('drag-over');
-                moveColumnByDrag(state.dragKey, key);
-            });
-            th.addEventListener('dragend', function () {
-                state.dragKey = '';
-                th.classList.remove('dragging');
-                columnsHeaderRow.querySelectorAll('.gnc-col-drag').forEach(function (el) {
-                    el.classList.remove('drag-over');
-                });
-            });
-
-            const sourceCell = document.createElement('td');
-            sourceCell.className = 'gnc-col-source';
-            sourceCell.textContent = row.entityTitle + ' / Уровень ' + row.level;
-
-            const sampleCell = document.createElement('td');
-            sampleCell.textContent = '...';
-
-            columnsHeaderRow.appendChild(th);
-            columnsSourceRow.appendChild(sourceCell);
-            columnsSampleRow.appendChild(sampleCell);
-        });
-    }
-
-    function collectSelectedFilterRows() {
-        const result = [];
-        const keyMap = {};
-
-        Object.keys(state.nodes).forEach(function (nodeId) {
-            const node = state.nodes[nodeId];
-            if (!node || !Array.isArray(node.fields)) {
-                return;
-            }
-            node.fields.forEach(function (field) {
-                keyMap[getFieldKey(nodeId, field.code)] = {
-                    key: getFieldKey(nodeId, field.code),
-                    nodeId: nodeId,
-                    entityCode: node.entityCode,
-                    entityTitle: node.entityTitle,
-                    fieldCode: field.code,
-                    fieldTitle: field.title
-                };
-            });
-        });
-
-        state.filterFieldKeys = state.filterFieldKeys.filter(function (key) {
-            return !!keyMap[key];
-        });
-
-        state.filterFieldKeys.forEach(function (key) {
-            if (keyMap[key]) {
-                result.push(keyMap[key]);
-            }
-        });
-
-        return result;
-    }
-
-    function renderSelectedFilters() {
-        const rows = collectSelectedFilterRows();
-        if (!rows.length) {
-            selectedFiltersBox.innerHTML = 'Пока не выбраны поля фильтра.';
-            return;
-        }
-
-        selectedFiltersBox.innerHTML = '';
-        rows.forEach(function (row) {
-            const chip = document.createElement('span');
-            chip.className = 'gnc-filter-chip';
-            const text = document.createElement('span');
-            text.className = 'gnc-filter-chip-text';
-            text.textContent = row.entityTitle + ': ' + row.fieldTitle;
-            chip.appendChild(text);
-
-            const removeBtn = document.createElement('button');
-            removeBtn.type = 'button';
-            removeBtn.className = 'gnc-filter-chip-remove';
-            removeBtn.title = 'Убрать из фильтров';
-            removeBtn.textContent = '×';
-            removeBtn.addEventListener('click', function () {
-                state.filterFieldKeys = state.filterFieldKeys.filter(function (key) {
-                    return key !== row.key;
-                });
-                renderTree();
-                renderSelectedFilters();
-            });
-            chip.appendChild(removeBtn);
-            selectedFiltersBox.appendChild(chip);
-        });
+        return rows.length;
     }
 
     function collectConfig() {
-        const filterFields = collectSelectedFilterRows().map(function (row) {
-            return {
-                key: row.key,
-                nodeId: row.nodeId,
-                entityCode: row.entityCode,
-                entityTitle: row.entityTitle,
-                fieldCode: row.fieldCode,
-                fieldTitle: row.fieldTitle
-            };
-        });
-
         const nodes = Object.keys(state.nodes).map(function (id) {
             const node = state.nodes[id];
             return {
@@ -1125,7 +921,6 @@
             rootEntity: state.rootEntityCode,
             contactFieldCode: state.contactFieldCode,
             columnOrder: state.columnOrder.slice(),
-            filterFields: filterFields,
             nodes: nodes
         };
     }
@@ -1191,7 +986,18 @@
             renderRelationMenuOverlay();
         }
     });
-    saveBtn.addEventListener('click', saveTemplate);
+    if (saveBtn) {
+        saveBtn.addEventListener('click', saveTemplate);
+    }
+    if (openReportBtn) {
+        openReportBtn.addEventListener('click', function () {
+            if (!state.templateId) {
+                alert('Сначала сохраните шаблон');
+                return;
+            }
+            window.location.href = '/local/otchet/report.php?id=' + encodeURIComponent(String(state.templateId));
+        });
+    }
 
     init();
 })();

@@ -104,9 +104,9 @@ try
             $pageSize = (int)$request->getPost('pageSize');
             if ($pageSize <= 0)
             {
-                $pageSize = 20;
+                $pageSize = 5000;
             }
-            $pageSize = max(1, min(200, $pageSize));
+            $pageSize = max(1, min(5000, $pageSize));
 
             $sortRaw = (string)$request->getPost('sort');
             $sort = $sortRaw !== '' ? Json::decode($sortRaw) : [];
@@ -647,6 +647,11 @@ function getEntityMeta(string $entityCode): array
         $fields[] = $userField;
     }
 
+    if (strtoupper($entityCode) === 'CONTACT')
+    {
+        $fields = appendContactAddressFieldsToMeta($fields);
+    }
+
     foreach (getConfiguredEntityRelations($entityCode) as $linkedEntityCode)
     {
         $links[$linkedEntityCode] = true;
@@ -671,6 +676,64 @@ function getEntityMeta(string $entityCode): array
         'fields' => $fields,
         'links' => $linkItems,
     ];
+}
+
+function appendContactAddressFieldsToMeta(array $fields): array
+{
+    $existing = [];
+    foreach ($fields as $field)
+    {
+        $code = strtoupper((string)($field['code'] ?? ''));
+        if ($code !== '')
+        {
+            $existing[$code] = true;
+        }
+    }
+
+    $addressMap = [
+        'ADDRESS' => 'Адрес (строка 1)',
+        'ADDRESS_2' => 'Адрес (строка 2)',
+        'ADDRESS_CITY' => 'Город',
+        'ADDRESS_POSTAL_CODE' => 'Почтовый индекс',
+        'ADDRESS_REGION' => 'Район',
+        'ADDRESS_PROVINCE' => 'Область',
+        'ADDRESS_COUNTRY' => 'Страна',
+        'ADDRESS_COUNTRY_CODE' => 'Код страны',
+        'REG_ADDRESS' => 'Адрес регистрации (строка 1)',
+        'REG_ADDRESS_2' => 'Адрес регистрации (строка 2)',
+        'REG_ADDRESS_CITY' => 'Город регистрации',
+        'REG_ADDRESS_POSTAL_CODE' => 'Индекс регистрации',
+        'REG_ADDRESS_REGION' => 'Район регистрации',
+        'REG_ADDRESS_PROVINCE' => 'Область регистрации',
+        'REG_ADDRESS_COUNTRY' => 'Страна регистрации',
+        'REG_ADDRESS_COUNTRY_CODE' => 'Код страны регистрации',
+    ];
+
+    foreach ($addressMap as $code => $title)
+    {
+        if (!empty($existing[$code]))
+        {
+            continue;
+        }
+
+        $fields[] = [
+            'code' => $code,
+            'title' => $title,
+            'type' => 'string',
+            'userTypeId' => 'string',
+            'typeTitle' => resolveFieldTypeTitle('string'),
+            'isDate' => false,
+            'isMultiple' => false,
+            'isRequired' => false,
+            'isLink' => false,
+            'isCrmLink' => false,
+            'linkTargets' => [],
+            'settings' => [],
+            'enumItems' => [],
+        ];
+    }
+
+    return $fields;
 }
 
 function getUserFieldsForEntity(string $entityCode, array $knownCodes, array $userMetaMap = []): array
@@ -1977,18 +2040,55 @@ function buildTemplatePreview(int $userId, string $templateId, array $filterValu
     $rootMetaByCode = buildMetaMapForPreview($rootMeta);
     $contactMetaByCode = buildMetaMapForPreview(getEntityMeta('CONTACT'));
 
-    $rootFilter = buildRootOrmFilterForPreview($filterValues, $filterIndex, $rootEntityCode, $rootMetaByCode);
+    $rootBaseFilter = buildRootOrmFilterForPreview($filterValues, $filterIndex, $rootEntityCode, $rootMetaByCode);
+    $rootBaseFilter = sanitizeOrmFilterForPreview($rootBaseFilter);
+    $rootFilter = $rootBaseFilter;
+    $rootPeriodRule = buildRootPeriodRuleForPreview($filterValues, $filterIndex, $rootEntityCode, $rootMetaByCode);
+    if ($rootPeriodRule !== null)
+    {
+        applyRootPeriodRuleToOrmFilterForPreview($rootFilter, $rootPeriodRule);
+        $rootFilter = sanitizeOrmFilterForPreview($rootFilter);
+    }
     $rootSelect = buildRootSelectForPreview($config, $filterItems, $contactFieldCode);
 
-    $rootItems = getPermissionFilteredItemsSafe($rootFactory, [
-        'select' => $rootSelect,
-        'filter' => $rootFilter,
-        'order' => ['ID' => 'DESC'],
-        'limit' => 5000,
-    ], $userId);
+    $needRootPeriodInMemoryFilter = false;
+    try
+    {
+        $rootItems = getPermissionFilteredItemsSafe($rootFactory, [
+            'select' => $rootSelect,
+            'filter' => $rootFilter,
+            'order' => ['ID' => 'DESC'],
+            'limit' => 5000,
+        ], $userId);
+    }
+    catch (\Throwable $e)
+    {
+        $isDateValueError = mb_stripos($e->getMessage(), 'Incorrect DATE value') !== false;
+        if (!$isDateValueError || $rootPeriodRule === null)
+        {
+            throw $e;
+        }
+
+        // Fallback for corrupted date data: load by base filter and apply period in PHP.
+        $rootItems = getPermissionFilteredItemsSafe($rootFactory, [
+            'select' => $rootSelect,
+            'filter' => $rootBaseFilter,
+            'order' => ['ID' => 'DESC'],
+            'limit' => 5000,
+        ], $userId);
+        $needRootPeriodInMemoryFilter = true;
+    }
+
+    if ($needRootPeriodInMemoryFilter && $rootPeriodRule !== null)
+    {
+        $rootItems = array_values(array_filter($rootItems, static function ($item) use ($rootPeriodRule): bool {
+            return matchRootPeriodRuleForPreview($item, $rootPeriodRule);
+        }));
+    }
 
     $contactsById = loadContactsForRootItems($rootItems, $contactFieldCode, $userId);
     $contactFilterRules = buildContactFilterRulesForPreview($filterValues, $filterIndex, $contactMetaByCode);
+    applyPeriodContactRuleForPreview($contactFilterRules, $filterValues, $filterIndex, $rootEntityCode, $contactMetaByCode);
 
     $rowsWithContext = [];
     foreach ($rootItems as $rootItem)
@@ -2011,8 +2111,10 @@ function buildTemplatePreview(int $userId, string $templateId, array $filterValu
         ];
     }
 
+    enrichRowsWithNodeItemsForPreview($rowsWithContext, $nodes, $userId);
+
     $columns = buildPreviewColumns($config, $nodes);
-    $rows = buildPreviewRows($rowsWithContext, $columns, $rootEntityCode, $contactFieldCode);
+    $rows = buildPreviewRows($rowsWithContext, $columns, $contactFieldCode);
 
     if (!empty($sort['columnKey']))
     {
@@ -2031,6 +2133,235 @@ function buildTemplatePreview(int $userId, string $templateId, array $filterValu
         'total' => $total,
         'columns' => $columns,
         'rows' => $pagedRows,
+    ];
+}
+
+function sanitizeOrmFilterForPreview(array $filter): array
+{
+    foreach ($filter as $key => $value)
+    {
+        if (is_array($value))
+        {
+            $filter[$key] = sanitizeOrmFilterForPreview($value);
+            if ($filter[$key] === [])
+            {
+                unset($filter[$key]);
+            }
+            continue;
+        }
+
+        if (!is_scalar($value))
+        {
+            continue;
+        }
+
+        if (trim((string)$value) === '')
+        {
+            unset($filter[$key]);
+        }
+    }
+
+    return $filter;
+}
+
+function applyPeriodFilterForPreview(array &$rootFilter, array $filterValues, array $filterIndex, string $rootEntityCode, array $rootMetaByCode): void
+{
+    $rule = buildRootPeriodRuleForPreview($filterValues, $filterIndex, $rootEntityCode, $rootMetaByCode);
+    if ($rule === null)
+    {
+        return;
+    }
+
+    applyRootPeriodRuleToOrmFilterForPreview($rootFilter, $rule);
+}
+
+function buildRootPeriodRuleForPreview(array $filterValues, array $filterIndex, string $rootEntityCode, array $rootMetaByCode): ?array
+{
+    $periodFieldId = trim((string)getFilterValueByFieldId($filterValues, 'PERIOD_FIELD'));
+    if ($periodFieldId === '' || !isset($filterIndex[$periodFieldId]))
+    {
+        return null;
+    }
+
+    $item = (array)$filterIndex[$periodFieldId];
+    $entityCode = strtoupper((string)($item['entityCode'] ?? ''));
+    if ($entityCode !== strtoupper($rootEntityCode))
+    {
+        return null;
+    }
+
+    $fieldCode = (string)($item['fieldCode'] ?? '');
+    if ($fieldCode === '')
+    {
+        return null;
+    }
+
+    $meta = $rootMetaByCode[$fieldCode] ?? [];
+    $isDateTime = isDateTimeMetaFieldForPreview($meta, $fieldCode);
+    $range = resolveDateRangeFromFilterForPreview($filterValues, 'PERIOD', $isDateTime);
+    if ($range['from'] !== '' && !isValidDateBoundaryForPreview($range['from'], $isDateTime))
+    {
+        $range['from'] = '';
+    }
+    if ($range['to'] !== '' && !isValidDateBoundaryForPreview($range['to'], $isDateTime))
+    {
+        $range['to'] = '';
+    }
+    if ($range['from'] === '' && $range['to'] === '')
+    {
+        return null;
+    }
+
+    return [
+        'fieldCode' => $fieldCode,
+        'from' => $range['from'],
+        'to' => $range['to'],
+        'isDateTime' => $isDateTime,
+    ];
+}
+
+function applyRootPeriodRuleToOrmFilterForPreview(array &$rootFilter, array $rule): void
+{
+    $fieldCode = (string)($rule['fieldCode'] ?? '');
+    if ($fieldCode === '')
+    {
+        return;
+    }
+
+    $from = trim((string)($rule['from'] ?? ''));
+    $to = trim((string)($rule['to'] ?? ''));
+    $isDateTime = (bool)($rule['isDateTime'] ?? false);
+
+    if ($from !== '' && isValidDateBoundaryForPreview($from, $isDateTime))
+    {
+        $rootFilter['>='.$fieldCode] = $from;
+    }
+    if ($to !== '' && isValidDateBoundaryForPreview($to, $isDateTime))
+    {
+        $rootFilter['<='.$fieldCode] = $to;
+    }
+}
+
+function matchRootPeriodRuleForPreview($item, array $rule): bool
+{
+    if (!is_object($item) || !method_exists($item, 'get'))
+    {
+        return false;
+    }
+
+    $fieldCode = (string)($rule['fieldCode'] ?? '');
+    if ($fieldCode === '')
+    {
+        return true;
+    }
+
+    $valueTs = parseDateValueToTimestampForPreview($item->get($fieldCode));
+    if ($valueTs === null)
+    {
+        return false;
+    }
+
+    $fromTs = parseDateValueToTimestampForPreview((string)($rule['from'] ?? ''));
+    $toTs = parseDateValueToTimestampForPreview((string)($rule['to'] ?? ''));
+
+    if ($fromTs !== null && $valueTs < $fromTs)
+    {
+        return false;
+    }
+    if ($toTs !== null && $valueTs > $toTs)
+    {
+        return false;
+    }
+
+    return true;
+}
+
+function parseDateValueToTimestampForPreview($value): ?int
+{
+    if ($value instanceof \Bitrix\Main\Type\DateTime || $value instanceof \Bitrix\Main\Type\Date)
+    {
+        $value = (string)$value;
+    }
+    elseif (is_object($value))
+    {
+        if (method_exists($value, 'getValue'))
+        {
+            return parseDateValueToTimestampForPreview($value->getValue());
+        }
+        if (method_exists($value, '__toString'))
+        {
+            $value = (string)$value;
+        }
+        else
+        {
+            return null;
+        }
+    }
+    elseif (is_array($value))
+    {
+        foreach ($value as $part)
+        {
+            $ts = parseDateValueToTimestampForPreview($part);
+            if ($ts !== null)
+            {
+                return $ts;
+            }
+        }
+        return null;
+    }
+
+    $text = trim((string)$value);
+    if ($text === '')
+    {
+        return null;
+    }
+
+    $ts = strtotime($text);
+    return $ts === false ? null : (int)$ts;
+}
+
+function applyPeriodContactRuleForPreview(array &$contactFilterRules, array $filterValues, array $filterIndex, string $rootEntityCode, array $contactMetaByCode): void
+{
+    $periodFieldId = trim((string)getFilterValueByFieldId($filterValues, 'PERIOD_FIELD'));
+    if ($periodFieldId === '' || !isset($filterIndex[$periodFieldId]))
+    {
+        return;
+    }
+
+    $item = (array)$filterIndex[$periodFieldId];
+    $entityCode = strtoupper((string)($item['entityCode'] ?? ''));
+    if ($entityCode === '' || $entityCode === strtoupper($rootEntityCode) || $entityCode !== 'CONTACT')
+    {
+        return;
+    }
+
+    $fieldCode = (string)($item['fieldCode'] ?? '');
+    if ($fieldCode === '')
+    {
+        return;
+    }
+
+    $meta = $contactMetaByCode[$fieldCode] ?? [];
+    $isDateTime = isDateTimeMetaFieldForPreview($meta, $fieldCode);
+    $range = resolveDateRangeFromFilterForPreview($filterValues, 'PERIOD', $isDateTime);
+    if ($range['from'] !== '' && !isValidDateBoundaryForPreview($range['from'], $isDateTime))
+    {
+        $range['from'] = '';
+    }
+    if ($range['to'] !== '' && !isValidDateBoundaryForPreview($range['to'], $isDateTime))
+    {
+        $range['to'] = '';
+    }
+    if ($range['from'] === '' && $range['to'] === '')
+    {
+        return;
+    }
+
+    $contactFilterRules[] = [
+        'fieldCode' => $fieldCode,
+        'type' => 'range',
+        'from' => $range['from'],
+        'to' => $range['to'],
     ];
 }
 
@@ -2162,15 +2493,16 @@ function appendOrmFilterConditionForPreview(array &$ormFilter, string $fieldCode
     $dateRange = resolveDateRangeFromFilterForPreview($filterValues, $fieldId, $isDateTime);
     $from = $dateRange['from'];
     $to = $dateRange['to'];
-    if ($from !== '')
+    if ($from !== '' && isValidDateBoundaryForPreview($from, $isDateTime))
     {
         $ormFilter['>='.$fieldCode] = $from;
     }
-    if ($to !== '')
+    if ($to !== '' && isValidDateBoundaryForPreview($to, $isDateTime))
     {
         $ormFilter['<='.$fieldCode] = $to;
     }
-    if ($from !== '' || $to !== '')
+    if (($from !== '' && isValidDateBoundaryForPreview($from, $isDateTime))
+        || ($to !== '' && isValidDateBoundaryForPreview($to, $isDateTime)))
     {
         return;
     }
@@ -2424,8 +2756,19 @@ function loadContactsForRootItems(array $rootItems, string $contactFieldCode, in
         return $result;
     }
 
+    $contactSelect = buildFactorySelectFields($contactFactory, [
+        'ID',
+        'TITLE',
+        'NAME',
+        'LAST_NAME',
+        'SECOND_NAME',
+        'COMPANY_TITLE',
+        'CREATED_TIME',
+        'UPDATED_TIME',
+    ]);
+
     $contacts = getPermissionFilteredItemsSafe($contactFactory, [
-        'select' => ['ID', 'TITLE', 'NAME', 'LAST_NAME', 'SECOND_NAME', 'COMPANY_TITLE', 'CREATED_TIME', 'UPDATED_TIME'],
+        'select' => $contactSelect,
         'filter' => ['@ID' => $contactIds],
         'limit' => count($contactIds),
     ], $userId);
@@ -2495,6 +2838,239 @@ function extractFirstContactIdFromValue($value): int
         return (int)$matches[1];
     }
     return 0;
+}
+
+function enrichRowsWithNodeItemsForPreview(array &$rowsWithContext, array $nodes, int $userId): void
+{
+    if (empty($rowsWithContext) || empty($nodes))
+    {
+        return;
+    }
+
+    $rootNodeId = '';
+    foreach ($nodes as $nodeId => $node)
+    {
+        if (empty($node['parentId']))
+        {
+            $rootNodeId = (string)$nodeId;
+            break;
+        }
+    }
+    if ($rootNodeId === '')
+    {
+        return;
+    }
+
+    foreach ($rowsWithContext as &$rowContext)
+    {
+        $rowContext['nodeItems'] = [];
+        $rootItem = $rowContext['rootItem'] ?? null;
+        if ($rootItem && is_object($rootItem))
+        {
+            $rowContext['nodeItems'][$rootNodeId] = $rootItem;
+        }
+    }
+    unset($rowContext);
+
+    $childrenByParent = [];
+    foreach ($nodes as $nodeId => $node)
+    {
+        $parentId = (string)($node['parentId'] ?? '');
+        if ($parentId === '')
+        {
+            continue;
+        }
+        if (!isset($childrenByParent[$parentId]))
+        {
+            $childrenByParent[$parentId] = [];
+        }
+        $childrenByParent[$parentId][] = (string)$nodeId;
+    }
+
+    $queue = [$rootNodeId];
+    while (!empty($queue))
+    {
+        $parentId = array_shift($queue);
+        $childNodeIds = (array)($childrenByParent[$parentId] ?? []);
+        foreach ($childNodeIds as $childNodeId)
+        {
+            $childNode = (array)($nodes[$childNodeId] ?? []);
+            $entityCode = (string)($childNode['entityCode'] ?? '');
+            $parentFieldCode = (string)($childNode['parentFieldCode'] ?? '');
+            if ($entityCode === '' || $parentFieldCode === '')
+            {
+                $queue[] = $childNodeId;
+                continue;
+            }
+
+            $factory = getFactoryByCode($entityCode);
+            if (!$factory)
+            {
+                $queue[] = $childNodeId;
+                continue;
+            }
+
+            $idsByRowIndex = [];
+            $allIds = [];
+            foreach ($rowsWithContext as $rowIndex => $rowContext)
+            {
+                $parentItem = $rowContext['nodeItems'][$parentId] ?? null;
+                if (!$parentItem || !is_object($parentItem) || !method_exists($parentItem, 'get'))
+                {
+                    $idsByRowIndex[$rowIndex] = [];
+                    continue;
+                }
+
+                $ids = extractEntityIdsFromRelationValueForPreview($parentItem->get($parentFieldCode));
+                $idsByRowIndex[$rowIndex] = $ids;
+                if (!empty($ids))
+                {
+                    $allIds = array_merge($allIds, $ids);
+                }
+            }
+
+            $allIds = array_values(array_unique(array_filter(array_map('intval', $allIds), static function (int $id): bool {
+                return $id > 0;
+            })));
+            if (empty($allIds))
+            {
+                $queue[] = $childNodeId;
+                continue;
+            }
+
+            $selectCandidates = ['ID', 'TITLE', 'NAME', 'LAST_NAME', 'SECOND_NAME', 'COMPANY_TITLE', 'CREATED_TIME', 'UPDATED_TIME'];
+            $selectedFields = is_array($childNode['selectedFields'] ?? null) ? $childNode['selectedFields'] : [];
+            foreach ($selectedFields as $fieldCode)
+            {
+                $fieldCode = trim((string)$fieldCode);
+                if ($fieldCode !== '')
+                {
+                    $selectCandidates[] = $fieldCode;
+                }
+            }
+            $nextChildren = (array)($childrenByParent[$childNodeId] ?? []);
+            foreach ($nextChildren as $nextChildId)
+            {
+                $nextFieldCode = trim((string)($nodes[$nextChildId]['parentFieldCode'] ?? ''));
+                if ($nextFieldCode !== '')
+                {
+                    $selectCandidates[] = $nextFieldCode;
+                }
+            }
+            $select = buildFactorySelectFields($factory, array_values(array_unique($selectCandidates)));
+
+            $items = getPermissionFilteredItemsSafe($factory, [
+                'select' => $select,
+                'filter' => ['@ID' => $allIds],
+                'limit' => count($allIds),
+            ], $userId);
+
+            $itemsById = [];
+            foreach ($items as $item)
+            {
+                if (!is_object($item) || !method_exists($item, 'getId'))
+                {
+                    continue;
+                }
+                $itemsById[(int)$item->getId()] = $item;
+            }
+
+            foreach ($rowsWithContext as $rowIndex => &$rowContext)
+            {
+                $picked = null;
+                foreach ((array)($idsByRowIndex[$rowIndex] ?? []) as $id)
+                {
+                    $id = (int)$id;
+                    if ($id > 0 && isset($itemsById[$id]))
+                    {
+                        $picked = $itemsById[$id];
+                        break;
+                    }
+                }
+                if ($picked !== null)
+                {
+                    if (!isset($rowContext['nodeItems']) || !is_array($rowContext['nodeItems']))
+                    {
+                        $rowContext['nodeItems'] = [];
+                    }
+                    $rowContext['nodeItems'][$childNodeId] = $picked;
+                }
+            }
+            unset($rowContext);
+
+            $queue[] = $childNodeId;
+        }
+    }
+}
+
+function extractEntityIdsFromRelationValueForPreview($value): array
+{
+    if ($value === null)
+    {
+        return [];
+    }
+
+    if (is_array($value))
+    {
+        $ids = [];
+        foreach ($value as $part)
+        {
+            $ids = array_merge($ids, extractEntityIdsFromRelationValueForPreview($part));
+        }
+        return array_values(array_unique(array_filter(array_map('intval', $ids), static function (int $id): bool {
+            return $id > 0;
+        })));
+    }
+
+    if (is_object($value))
+    {
+        if (method_exists($value, 'getValue'))
+        {
+            return extractEntityIdsFromRelationValueForPreview($value->getValue());
+        }
+        if (method_exists($value, '__toString'))
+        {
+            return extractEntityIdsFromRelationValueForPreview((string)$value);
+        }
+        return [];
+    }
+
+    $text = trim((string)$value);
+    if ($text === '')
+    {
+        return [];
+    }
+
+    if (ctype_digit($text))
+    {
+        $id = (int)$text;
+        return $id > 0 ? [$id] : [];
+    }
+
+    if ($text[0] === '{' || $text[0] === '[')
+    {
+        try
+        {
+            $decoded = Json::decode($text);
+        }
+        catch (\Throwable $e)
+        {
+            $decoded = null;
+        }
+        if ($decoded !== null)
+        {
+            return extractEntityIdsFromRelationValueForPreview($decoded);
+        }
+    }
+
+    if (preg_match_all('/(?:^|_)(\d+)(?:$|[^0-9])/', $text, $matches) && !empty($matches[1]))
+    {
+        return array_values(array_unique(array_filter(array_map('intval', $matches[1]), static function (int $id): bool {
+            return $id > 0;
+        })));
+    }
+
+    return [];
 }
 
 function normalizeContactSelectorValuesForPreview($raw): array
@@ -2718,58 +3294,182 @@ function matchSingleRuleForPreview($fieldValue, array $rule): bool
     $type = (string)($rule['type'] ?? '');
     if ($type === 'range')
     {
-        $value = (string)$fieldValue;
         $from = (string)($rule['from'] ?? '');
         $to = (string)($rule['to'] ?? '');
-        if ($from !== '' && $value < $from)
+        $fromTs = $from !== '' ? parseDateValueToTimestampForPreview($from) : null;
+        $toTs = $to !== '' ? parseDateValueToTimestampForPreview($to) : null;
+
+        $values = normalizeFieldValuesForComparisonForPreview($fieldValue);
+        if (empty($values))
         {
             return false;
         }
-        if ($to !== '' && $value > $to)
+
+        foreach ($values as $value)
         {
-            return false;
+            $valueTs = parseDateValueToTimestampForPreview($value);
+            if ($valueTs === null)
+            {
+                // Fallback for non-date strings.
+                if ($from !== '' && $value < $from)
+                {
+                    continue;
+                }
+                if ($to !== '' && $value > $to)
+                {
+                    continue;
+                }
+                return true;
+            }
+
+            if ($fromTs !== null && $valueTs < $fromTs)
+            {
+                continue;
+            }
+            if ($toTs !== null && $valueTs > $toTs)
+            {
+                continue;
+            }
+
+            return true;
         }
-        return true;
+
+        return false;
     }
 
     if ($type === 'in')
     {
-        $values = (array)($rule['values'] ?? []);
-        if (is_array($fieldValue))
+        $needles = array_values(array_filter(array_map('strval', (array)($rule['values'] ?? [])), static function (string $v): bool {
+            return trim($v) !== '';
+        }));
+        if (empty($needles))
         {
-            foreach ($fieldValue as $part)
-            {
-                if (in_array((string)$part, $values, true))
-                {
-                    return true;
-                }
-            }
             return false;
         }
-        return in_array((string)$fieldValue, $values, true);
+
+        $haystack = normalizeFieldValuesForComparisonForPreview($fieldValue);
+        if (empty($haystack))
+        {
+            return false;
+        }
+
+        foreach ($haystack as $value)
+        {
+            if (in_array($value, $needles, true))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     if ($type === 'eq')
     {
-        return (string)$fieldValue === (string)($rule['value'] ?? '');
+        $expected = trim((string)($rule['value'] ?? ''));
+        if ($expected === '')
+        {
+            return false;
+        }
+
+        $values = normalizeFieldValuesForComparisonForPreview($fieldValue);
+        if (empty($values))
+        {
+            return false;
+        }
+
+        return in_array($expected, $values, true);
     }
 
     if ($type === 'contains')
     {
         $needle = (string)($rule['value'] ?? '');
-        return mb_stripos((string)$fieldValue, $needle) !== false;
+        if ($needle === '')
+        {
+            return false;
+        }
+
+        $values = normalizeFieldValuesForComparisonForPreview($fieldValue);
+        foreach ($values as $value)
+        {
+            if (mb_stripos($value, $needle) !== false)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     return true;
 }
 
+function normalizeFieldValuesForComparisonForPreview($value): array
+{
+    if ($value === null)
+    {
+        return [];
+    }
+
+    if (is_array($value))
+    {
+        $result = [];
+        foreach ($value as $part)
+        {
+            $result = array_merge($result, normalizeFieldValuesForComparisonForPreview($part));
+        }
+        return array_values(array_unique(array_filter($result, static function (string $v): bool {
+            return $v !== '';
+        })));
+    }
+
+    if (is_object($value))
+    {
+        if (method_exists($value, 'getValue'))
+        {
+            return normalizeFieldValuesForComparisonForPreview($value->getValue());
+        }
+        if (method_exists($value, '__toString'))
+        {
+            return normalizeFieldValuesForComparisonForPreview((string)$value);
+        }
+        return [];
+    }
+
+    $text = trim((string)$value);
+    if ($text === '')
+    {
+        return [];
+    }
+
+    return [$text];
+}
+
 function buildPreviewColumns(array $config, array $nodes): array
 {
     $rows = [];
+    $metaByEntity = [];
+    $levelByNode = [];
+
+    foreach ($nodes as $nodeId => $_node)
+    {
+        $levelByNode[$nodeId] = resolveNodeLevelForPreview($nodes, $nodeId);
+    }
+
     foreach ($nodes as $nodeId => $node)
     {
         $entityCode = (string)($node['entityCode'] ?? '');
         $entityTitle = (string)($node['entityTitle'] ?? $entityCode);
+        if ($entityCode === '')
+        {
+            continue;
+        }
+
+        if (!isset($metaByEntity[$entityCode]))
+        {
+            $metaByEntity[$entityCode] = buildMetaMapForPreview(getEntityMeta($entityCode));
+        }
+
         $selectedFields = is_array($node['selectedFields'] ?? null) ? $node['selectedFields'] : [];
         foreach ($selectedFields as $fieldCode)
         {
@@ -2778,48 +3478,94 @@ function buildPreviewColumns(array $config, array $nodes): array
             {
                 continue;
             }
+
+            $meta = (array)($metaByEntity[$entityCode][$fieldCode] ?? []);
+            $fieldTitle = trim((string)($meta['title'] ?? ''));
+            if ($fieldTitle === '')
+            {
+                $fieldTitle = $fieldCode;
+            }
+
+            $level = (int)($levelByNode[$nodeId] ?? 1);
+            $source = $entityTitle.' / Уровень '.$level;
             $rows[] = [
                 'key' => $nodeId.'::'.$fieldCode,
                 'nodeId' => $nodeId,
                 'entityCode' => $entityCode,
                 'fieldCode' => $fieldCode,
-                'title' => $fieldCode,
-                'source' => $entityTitle,
+                'title' => $fieldTitle,
+                'source' => $source,
             ];
         }
     }
 
     $order = is_array($config['columnOrder'] ?? null) ? $config['columnOrder'] : [];
-    if (empty($order))
+    if (!empty($order))
     {
-        return $rows;
+        $byKey = [];
+        foreach ($rows as $row)
+        {
+            $byKey[(string)$row['key']] = $row;
+        }
+
+        $ordered = [];
+        foreach ($order as $key)
+        {
+            $key = (string)$key;
+            if (isset($byKey[$key]))
+            {
+                $ordered[] = $byKey[$key];
+                unset($byKey[$key]);
+            }
+        }
+        foreach ($byKey as $row)
+        {
+            $ordered[] = $row;
+        }
+        $rows = $ordered;
     }
 
-    $byKey = [];
+    // If titles repeat (e.g. "Название"), append source for clarity.
+    $titleCounts = [];
     foreach ($rows as $row)
     {
-        $byKey[(string)$row['key']] = $row;
+        $title = (string)($row['title'] ?? '');
+        $titleCounts[$title] = (int)($titleCounts[$title] ?? 0) + 1;
     }
-
-    $result = [];
-    foreach ($order as $key)
+    foreach ($rows as &$row)
     {
-        $key = (string)$key;
-        if (isset($byKey[$key]))
+        $title = (string)($row['title'] ?? '');
+        if ($title !== '' && (int)($titleCounts[$title] ?? 0) > 1)
         {
-            $result[] = $byKey[$key];
-            unset($byKey[$key]);
+            $row['title'] = $title.' ('.$row['source'].')';
         }
     }
-    foreach ($byKey as $row)
-    {
-        $result[] = $row;
-    }
+    unset($row);
 
-    return $result;
+    return $rows;
 }
 
-function buildPreviewRows(array $rowsWithContext, array $columns, string $rootEntityCode, string $contactFieldCode): array
+function resolveNodeLevelForPreview(array $nodes, string $nodeId): int
+{
+    $level = 1;
+    $currentId = $nodeId;
+    $guard = 0;
+    while (isset($nodes[$currentId]) && $guard < 100)
+    {
+        $parentId = (string)($nodes[$currentId]['parentId'] ?? '');
+        if ($parentId === '' || !isset($nodes[$parentId]))
+        {
+            break;
+        }
+        $level++;
+        $currentId = $parentId;
+        $guard++;
+    }
+
+    return $level;
+}
+
+function buildPreviewRows(array $rowsWithContext, array $columns, string $contactFieldCode): array
 {
     $result = [];
     foreach ($rowsWithContext as $rowContext)
@@ -2829,30 +3575,27 @@ function buildPreviewRows(array $rowsWithContext, array $columns, string $rootEn
         {
             continue;
         }
-        $contactItem = $rowContext['contactItem'] ?? null;
+
+        $nodeItems = is_array($rowContext['nodeItems'] ?? null) ? $rowContext['nodeItems'] : [];
         $cells = [];
         foreach ($columns as $column)
         {
             $key = (string)($column['key'] ?? '');
-            $entityCode = strtoupper((string)($column['entityCode'] ?? ''));
             $fieldCode = (string)($column['fieldCode'] ?? '');
-            if ($key === '' || $fieldCode === '')
+            $nodeId = (string)($column['nodeId'] ?? '');
+            if ($key === '' || $fieldCode === '' || $nodeId === '')
             {
                 continue;
             }
 
-            if ($entityCode === 'CONTACT')
-            {
-                $cells[$key] = stringifyPreviewValue($contactItem && method_exists($contactItem, 'get') ? $contactItem->get($fieldCode) : '');
-            }
-            elseif ($entityCode === strtoupper($rootEntityCode))
-            {
-                $cells[$key] = stringifyPreviewValue($rootItem->get($fieldCode));
-            }
-            else
+            $nodeItem = $nodeItems[$nodeId] ?? null;
+            if (!$nodeItem || !is_object($nodeItem) || !method_exists($nodeItem, 'get'))
             {
                 $cells[$key] = '';
+                continue;
             }
+
+            $cells[$key] = stringifyPreviewValue($nodeItem->get($fieldCode));
         }
 
         $result[] = [
@@ -3087,4 +3830,22 @@ function resolveDateRangeFromFilterForPreview(array $filterValues, string $field
         'from' => normalizePeriodBoundaryValue($from, true, $isDateTime),
         'to' => normalizePeriodBoundaryValue($to, false, $isDateTime),
     ];
+}
+
+function isValidDateBoundaryForPreview(string $value, bool $isDateTime): bool
+{
+    $value = trim($value);
+    if ($value === '')
+    {
+        return false;
+    }
+
+    if ($isDateTime)
+    {
+        return (bool)preg_match('/^\\d{4}-\\d{2}-\\d{2}\\s\\d{2}:\\d{2}:\\d{2}$/', $value)
+            || (bool)preg_match('/^\\d{2}\\.\\d{2}\\.\\d{4}\\s\\d{2}:\\d{2}:\\d{2}$/', $value);
+    }
+
+    return (bool)preg_match('/^\\d{4}-\\d{2}-\\d{2}$/', $value)
+        || (bool)preg_match('/^\\d{2}\\.\\d{2}\\.\\d{4}$/', $value);
 }

@@ -491,6 +491,10 @@
     overflow: auto;
 }
 
+.gnc-preview-scroll {
+    max-height: 70vh;
+}
+
 .gnc-table {
     width: 100%;
     border-collapse: collapse;

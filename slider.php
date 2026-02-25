@@ -1,7 +1,7 @@
 <?php
 require $_SERVER['DOCUMENT_ROOT'].'/bitrix/header.php';
 $APPLICATION->SetTitle('GNC Export - Настройка шаблона');
-$assetVersion = '20260223-11';
+$assetVersion = '20260225-01';
 ?>
 <div class="gnc-slider-page">
     <script>
@@ -42,6 +42,7 @@ $assetVersion = '20260223-11';
             <h2 id="sliderFormTitle">Новый шаблон</h2>
             <div class="gnc-slider-page-actions">
                 <a href="/local/otchet/index.php" class="ui-btn ui-btn-light-border">Отмена</a>
+                <button type="button" class="ui-btn ui-btn-light-border" id="openReportBtn">Сформировать отчет</button>
                 <button type="button" class="ui-btn ui-btn-primary" id="saveTemplateBtn">Сохранить</button>
             </div>
         </div>
@@ -56,32 +57,7 @@ $assetVersion = '20260223-11';
             <select id="rootEntitySelect"></select>
         </div>
 
-        <div class="gnc-field-row">
-            <label>Поля фильтра</label>
-            <div id="selectedFiltersBox" class="gnc-selected-filters">Пока не выбраны поля фильтра.</div>
-        </div>
-
-        <h3>Колонки отчета</h3>
-        <p>Колонки формируются автоматически из выбранных полей. Перетаскивайте заголовки мышкой, чтобы менять порядок.</p>
-        <div class="gnc-table-wrap">
-            <table class="gnc-table" id="columnsTable">
-                <thead>
-                <tr id="columnsHeaderRow">
-                    <th class="gnc-empty" colspan="1">Пока не выбраны поля.</th>
-                </tr>
-                </thead>
-                <tbody>
-                <tr id="columnsSourceRow">
-                    <td class="gnc-empty">Источник колонок появится после выбора полей.</td>
-                </tr>
-                <tr id="columnsSampleRow">
-                    <td class="gnc-empty">Пример строки таблицы.</td>
-                </tr>
-                </tbody>
-            </table>
-        </div>
-
-        <p>Отмечайте поля для колонок. Кнопка <strong>⚲</strong> справа добавляет поле в фильтры отчета.</p>
+        <p>Отмечайте поля для колонок. Связанные сущности выбираются через значок связи в заголовке каждого блока.</p>
         <div id="entityTree" class="gnc-levels"></div>
     </section>
 </div>
