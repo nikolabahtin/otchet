@@ -650,6 +650,7 @@ function getEntityMeta(string $entityCode): array
     if (strtoupper($entityCode) === 'CONTACT')
     {
         $fields = appendContactAddressFieldsToMeta($fields);
+        $fields = appendContactCommunicationFieldsToMeta($fields);
     }
 
     foreach (getConfiguredEntityRelations($entityCode) as $linkedEntityCode)
@@ -724,6 +725,52 @@ function appendContactAddressFieldsToMeta(array $fields): array
             'typeTitle' => resolveFieldTypeTitle('string'),
             'isDate' => false,
             'isMultiple' => false,
+            'isRequired' => false,
+            'isLink' => false,
+            'isCrmLink' => false,
+            'linkTargets' => [],
+            'settings' => [],
+            'enumItems' => [],
+        ];
+    }
+
+    return $fields;
+}
+
+function appendContactCommunicationFieldsToMeta(array $fields): array
+{
+    $existing = [];
+    foreach ($fields as $field)
+    {
+        $code = strtoupper((string)($field['code'] ?? ''));
+        if ($code !== '')
+        {
+            $existing[$code] = true;
+        }
+    }
+
+    $commMap = [
+        'PHONE' => 'Телефон',
+        'EMAIL' => 'E-mail',
+        'IM' => 'Мессенджеры',
+        'WEB' => 'Сайты / соцсети',
+    ];
+
+    foreach ($commMap as $code => $title)
+    {
+        if (!empty($existing[$code]))
+        {
+            continue;
+        }
+
+        $fields[] = [
+            'code' => $code,
+            'title' => $title,
+            'type' => 'string',
+            'userTypeId' => 'string',
+            'typeTitle' => resolveFieldTypeTitle('string'),
+            'isDate' => false,
+            'isMultiple' => true,
             'isRequired' => false,
             'isLink' => false,
             'isCrmLink' => false,

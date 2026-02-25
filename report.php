@@ -63,6 +63,16 @@ if (!$template)
     return;
 }
 
+if (!$isExportExcel)
+{
+    $templateTitle = trim((string)($template['name'] ?? ''));
+    if ($templateTitle === '')
+    {
+        $templateTitle = '#'.(string)($template['id'] ?? '');
+    }
+    $APPLICATION->SetTitle('GNC Export - Формирование отчета: '.$templateTitle);
+}
+
 $config = is_array($template['config'] ?? null) ? $template['config'] : [];
 $nodes = is_array($config['nodes'] ?? null) ? $config['nodes'] : [];
 $nodeMap = buildNodeMap($nodes);
@@ -310,6 +320,20 @@ $ormFilter = buildOrmFilterByRootColumns($filterData, $columnFilterMap, $gridCol
 $findText = trim((string)($filterData['FIND'] ?? ''));
 $allDynamicRules = buildDynamicFilterRules($filterData, $columnFilterMap);
 $dynamicRules = keepNonRootRules($allDynamicRules, $gridColumnMap, $rootNodeId);
+$contactPrefilterResult = buildContactPrefilterFromRules(
+    $dynamicRules,
+    $columnFilterMap,
+    $gridColumnMap,
+    $nodeMap,
+    $rootNodeId,
+    $userId
+);
+$dynamicRules = (array)($contactPrefilterResult['remainingRules'] ?? $dynamicRules);
+$contactRootFilter = (array)($contactPrefilterResult['rootFilter'] ?? []);
+if (!empty($contactRootFilter))
+{
+    $ormFilter = array_merge($ormFilter, $contactRootFilter);
+}
 $needsInMemoryFilter = !empty($dynamicRules) || $findText !== '';
 $allowHeavyInMemory = $isExportExcel || $needsInMemoryFilter || $needsInMemorySort;
 if (!$allowHeavyInMemory)
@@ -499,9 +523,19 @@ if ($isExportExcel)
         border-radius: 10px;
         padding: 12px;
     }
+    .otchet-report2-filter-row {
+        display: flex;
+        align-items: flex-start;
+        gap: 12px;
+        margin: 0 0 14px;
+    }
+    .otchet-report2-filter-wrap {
+        flex: 1 1 auto;
+        min-width: 0;
+    }
 
     .otchet-report2-layout .main-ui-filter-search {
-        margin-bottom: 14px;
+        margin-bottom: 0;
         border: 1px solid #d8e1ea;
         border-radius: 10px;
         background: #fff;
@@ -520,66 +554,92 @@ if ($isExportExcel)
         align-items: center;
         justify-content: flex-end;
         gap: 10px;
-        margin: 0 0 12px;
+        margin: 0;
     }
 
     .otchet-report2-toolbar .ui-btn {
         white-space: nowrap;
     }
-
-    .otchet-report2-loading {
-        position: fixed;
-        inset: 0;
-        background: rgba(255, 255, 255, 0.75);
-        backdrop-filter: blur(1px);
-        z-index: 1000;
-        display: none;
-        align-items: center;
-        justify-content: center;
-    }
-
-    .otchet-report2-loading-box {
-        background: #fff;
-        border: 1px solid #d8e1ea;
-        border-radius: 10px;
-        padding: 14px 18px;
+    .otchet-report2-logs-label {
+        color: #70859b;
         font-size: 14px;
-        color: #2f3f50;
-        box-shadow: 0 8px 20px rgba(30, 53, 78, 0.12);
+        margin-right: 4px;
     }
+    #reportDebugToggleWrap {
+        position: relative;
+        display: inline-flex;
+        width: 46px;
+        height: 24px;
+        border-radius: 12px;
+        background: #cfd8e3;
+        cursor: pointer;
+        flex: 0 0 auto;
+        transition: background-color .2s ease;
+        margin-right: 8px;
+    }
+    #reportDebugToggleWrap .ui-switcher-checkbox {
+        position: absolute;
+        opacity: 0;
+        pointer-events: none;
+    }
+    #reportDebugToggleWrap .ui-switcher-enabled,
+    #reportDebugToggleWrap .ui-switcher-disabled {
+        display: none;
+    }
+    #reportDebugToggleWrap .ui-switcher-toggle {
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 20px;
+        height: 20px;
+        border-radius: 50%;
+        background: #fff;
+        box-shadow: 0 1px 3px rgba(30, 53, 78, .25);
+        transition: transform .2s ease;
+    }
+    #reportDebugToggleWrap.ui-switcher-checked {
+        background: #2fc6f6;
+    }
+    #reportDebugToggleWrap.ui-switcher-checked .ui-switcher-toggle {
+        transform: translateX(22px);
+    }
+
 </style>
 
 <div class="ui-page-slider-workarea otchet-report2-layout">
-    <div class="otchet-report2-loading" id="reportLoadingMask">
-        <div class="otchet-report2-loading-box">
-            <span class="otchet-report2-loading-text">Формируем отчет, подождите...</span>
-        </div>
-    </div>
-    <div class="ui-alert ui-alert-primary">
-        <span class="ui-alert-message">report.php: связка <b>Bitrix Filter + Bitrix Grid</b> для шаблона #<?=htmlspecialcharsbx((string)$template['id'])?>.</span>
-    </div>
-
     <pre id="reportDbgBox" class="otchet-report2-debug"><?=htmlspecialcharsbx(Json::encode($debugPayload, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT))?></pre>
 
-    <div class="otchet-report2-toolbar">
-        <a class="ui-btn ui-btn-light-border" href="/local/otchet/index.php">Назад к шаблонам</a>
-        <a class="ui-btn ui-btn-light-border" href="/local/otchet/slider.php?id=<?=urlencode((string)$template['id'])?>">Корректировать шаблон</a>
-        <a class="ui-btn ui-btn-primary" id="exportExcelLink" href="/local/otchet/report.php?id=<?=urlencode((string)$template['id'])?>&export=excel">Выгрузить в Excel</a>
+    <div class="otchet-report2-filter-row">
+        <div class="otchet-report2-filter-wrap">
+            <?php
+            $APPLICATION->IncludeComponent('bitrix:main.ui.filter', '', [
+                'FILTER_ID' => $filterId,
+                'GRID_ID' => $gridId,
+                'FILTER' => $filterDefinition,
+                'ENABLE_LABEL' => true,
+                'ENABLE_LIVE_SEARCH' => true,
+                'ENABLE_ADDITIONAL_FILTERS' => true,
+                'RESET_TO_DEFAULT_MODE' => false,
+                'DISABLE_SEARCH' => false,
+                'ENABLE_FIELDS_SEARCH' => true,
+            ], false);
+            ?>
+        </div>
+        <div class="otchet-report2-toolbar">
+            <span class="otchet-report2-logs-label">Логи</span>
+            <label class="ui-switcher ui-switcher-checked" id="reportDebugToggleWrap">
+                <input type="checkbox" class="ui-switcher-checkbox" id="reportDebugToggle" checked>
+                <span class="ui-switcher-enabled">Вкл</span>
+                <span class="ui-switcher-disabled">Выкл</span>
+                <span class="ui-switcher-toggle"></span>
+            </label>
+            <a class="ui-btn ui-btn-light-border" href="/local/otchet/index.php">Назад к шаблонам</a>
+            <a class="ui-btn ui-btn-light-border" href="/local/otchet/slider.php?id=<?=urlencode((string)$template['id'])?>">Корректировать шаблон</a>
+            <a class="ui-btn ui-btn-primary" id="exportExcelLink" href="/local/otchet/report.php?id=<?=urlencode((string)$template['id'])?>&export=excel">Выгрузить в Excel</a>
+        </div>
     </div>
 
     <?php
-    $APPLICATION->IncludeComponent('bitrix:main.ui.filter', '', [
-        'FILTER_ID' => $filterId,
-        'GRID_ID' => $gridId,
-        'FILTER' => $filterDefinition,
-        'ENABLE_LABEL' => true,
-        'ENABLE_LIVE_SEARCH' => true,
-        'ENABLE_ADDITIONAL_FILTERS' => true,
-        'RESET_TO_DEFAULT_MODE' => false,
-        'DISABLE_SEARCH' => false,
-        'ENABLE_FIELDS_SEARCH' => true,
-    ], false);
-
     $APPLICATION->IncludeComponent('bitrix:main.ui.grid', '', [
         'GRID_ID' => $gridId,
         'COLUMNS' => $gridColumns,
@@ -616,32 +676,67 @@ if ($isExportExcel)
     ?>
     <script>
         (function () {
-            var mask = document.getElementById('reportLoadingMask');
-            var textNode = mask ? mask.querySelector('.otchet-report2-loading-text') : null;
-            function showLoading(text) {
-                if (!mask) { return; }
-                if (textNode && text) { textNode.textContent = text; }
-                mask.style.display = 'flex';
+            var waitNode = null;
+            function showBitrixWait() {
+                if (!window.BX || typeof BX.showWait !== 'function') { return; }
+                if (waitNode) { return; }
+                waitNode = BX.showWait();
             }
-            function hideLoading() {
-                if (!mask) { return; }
-                mask.style.display = 'none';
+            function hideBitrixWait() {
+                if (!window.BX || typeof BX.closeWait !== 'function') { return; }
+                if (!waitNode) { return; }
+                BX.closeWait(null, waitNode);
+                waitNode = null;
             }
 
-            document.addEventListener('DOMContentLoaded', hideLoading);
-            window.addEventListener('pageshow', hideLoading);
+            document.addEventListener('DOMContentLoaded', hideBitrixWait);
+            window.addEventListener('pageshow', hideBitrixWait);
+
+            var dbgBox = document.getElementById('reportDbgBox');
+            var dbgToggle = document.getElementById('reportDebugToggle');
+            var dbgToggleWrap = document.getElementById('reportDebugToggleWrap');
+            var dbgStorageKey = 'gnc_otchet_report_debug_visible';
+            function applyDebugVisibility(visible) {
+                if (dbgBox) {
+                    dbgBox.style.display = visible ? '' : 'none';
+                }
+                if (dbgToggle) {
+                    dbgToggle.checked = !!visible;
+                }
+                if (dbgToggleWrap) {
+                    dbgToggleWrap.classList.toggle('ui-switcher-checked', !!visible);
+                    dbgToggleWrap.classList.toggle('ui-switcher-on', !!visible);
+                }
+            }
+            if (dbgToggle) {
+                var initialVisible = true;
+                try {
+                    var raw = localStorage.getItem(dbgStorageKey);
+                    if (raw === '0') {
+                        initialVisible = false;
+                    }
+                } catch (e) {}
+                applyDebugVisibility(initialVisible);
+                dbgToggle.addEventListener('change', function () {
+                    var visible = !!dbgToggle.checked;
+                    applyDebugVisibility(visible);
+                    try {
+                        localStorage.setItem(dbgStorageKey, visible ? '1' : '0');
+                    } catch (e) {}
+                });
+            }
 
             var exportLink = document.getElementById('exportExcelLink');
             if (exportLink) {
                 exportLink.addEventListener('click', function () {
-                    showLoading('Подготавливаем Excel-файл...');
+                    showBitrixWait();
                     // Нельзя надежно отследить завершение download по ссылке,
                     // поэтому прячем маску при возврате фокуса и по таймауту.
                     var done = false;
                     var finish = function () {
                         if (done) { return; }
                         done = true;
-                        hideLoading();
+                        hideBitrixWait();
                         window.removeEventListener('focus', onFocusBack);
                     };
                     var onFocusBack = function () {
@@ -990,6 +1085,33 @@ function getEntityFieldMetaMap(string $entityCode): array
                 'isEmployee' => false,
                 'isMultiple' => false,
                 'isSyntheticAddress' => true,
+                'enumItems' => [],
+            ];
+        }
+
+        $communicationMap = [
+            'PHONE' => 'Телефон',
+            'EMAIL' => 'E-mail',
+            'IM' => 'Мессенджеры',
+            'WEB' => 'Сайты / соцсети',
+        ];
+        foreach ($communicationMap as $code => $title)
+        {
+            if (isset($result[$code]))
+            {
+                continue;
+            }
+            $result[$code] = [
+                'code' => $code,
+                'title' => $title,
+                'type' => 'string',
+                'userTypeId' => 'string',
+                'isDate' => false,
+                'isNumeric' => false,
+                'isBoolean' => false,
+                'isEmployee' => false,
+                'isMultiple' => true,
+                'isSyntheticCommunication' => true,
                 'enumItems' => [],
             ];
         }
@@ -1418,6 +1540,182 @@ function buildOrmFilterByRootColumns(array $filterValues, array $columnFilterMap
     }
 
     return $filter;
+}
+
+function buildContactPrefilterFromRules(
+    array $rules,
+    array $columnFilterMap,
+    array $gridColumnMap,
+    array $nodeMap,
+    string $rootNodeId,
+    int $userId
+): array {
+    $remaining = [];
+    $contactFilterByRelation = [];
+
+    foreach ($rules as $rule)
+    {
+        $columnId = (string)($rule['columnId'] ?? '');
+        $gridCol = (array)($gridColumnMap[$columnId] ?? []);
+        $nodeId = (string)($gridCol['nodeId'] ?? '');
+        $entityCode = strtoupper((string)($gridCol['entityCode'] ?? ''));
+        $fieldCode = (string)($gridCol['fieldCode'] ?? '');
+
+        if ($columnId === '' || $nodeId === '' || $entityCode !== 'CONTACT')
+        {
+            $remaining[] = $rule;
+            continue;
+        }
+
+        $node = (array)($nodeMap[$nodeId] ?? []);
+        $parentId = (string)($node['parentId'] ?? '');
+        $relationField = trim((string)($node['parentFieldCode'] ?? ''));
+        if ($parentId !== $rootNodeId || $relationField === '' || $fieldCode === '')
+        {
+            $remaining[] = $rule;
+            continue;
+        }
+
+        $mapped = mapRuleToOrmCondition($rule, $fieldCode, !empty($columnFilterMap[$columnId]['isEmployee']));
+        if ($mapped === null)
+        {
+            $remaining[] = $rule;
+            continue;
+        }
+
+        if (!isset($contactFilterByRelation[$relationField]))
+        {
+            $contactFilterByRelation[$relationField] = [];
+        }
+        foreach ($mapped as $k => $v)
+        {
+            $contactFilterByRelation[$relationField][$k] = $v;
+        }
+    }
+
+    if (empty($contactFilterByRelation))
+    {
+        return ['rootFilter' => [], 'remainingRules' => $remaining];
+    }
+
+    $rootFilter = [];
+    foreach ($contactFilterByRelation as $relationField => $contactFilter)
+    {
+        if (empty($contactFilter))
+        {
+            continue;
+        }
+        $ids = getContactIdsByLegacyFilter($contactFilter);
+
+        if (empty($ids))
+        {
+            $rootFilter['=ID'] = -1;
+            break;
+        }
+
+        $rootFilter['@'.$relationField] = $ids;
+    }
+
+    return ['rootFilter' => $rootFilter, 'remainingRules' => $remaining];
+}
+
+function mapRuleToOrmCondition(array $rule, string $fieldCode, bool $isEmployeeField = false): ?array
+{
+    $type = (string)($rule['type'] ?? '');
+    switch ($type)
+    {
+        case 'contains':
+            $value = trim((string)($rule['value'] ?? ''));
+            if ($value === '')
+            {
+                return null;
+            }
+            // Для адресных полей точное сравнение обычно работает заметно быстрее, чем %LIKE%.
+            if (isContactAddressFieldCode($fieldCode))
+            {
+                return ['='.$fieldCode => $value];
+            }
+            return ['%'.$fieldCode => $value];
+
+        case 'in':
+            $values = array_values(array_filter(array_map('strval', (array)($rule['values'] ?? [])), static function (string $v): bool {
+                return trim($v) !== '';
+            }));
+            if ($isEmployeeField)
+            {
+                $values = array_values(array_filter(array_map(static function (string $v): int {
+                    return normalizeUserId($v);
+                }, $values), static function (int $id): bool {
+                    return $id > 0;
+                }));
+            }
+            if (empty($values))
+            {
+                return null;
+            }
+            return [((count($values) > 1) ? '@' : '=') . $fieldCode => count($values) > 1 ? $values : $values[0]];
+
+        case 'employee_in':
+            $values = array_values(array_filter(array_map(static function ($v): int {
+                return (int)$v;
+            }, (array)($rule['values'] ?? [])), static function (int $id): bool {
+                return $id > 0;
+            }));
+            if (empty($values))
+            {
+                return null;
+            }
+            return [((count($values) > 1) ? '@' : '=') . $fieldCode => count($values) > 1 ? $values : $values[0]];
+
+        case 'date_range':
+            $res = [];
+            $from = trim((string)($rule['from'] ?? ''));
+            $to = trim((string)($rule['to'] ?? ''));
+            if ($from !== '') { $res['>='.$fieldCode] = $from; }
+            if ($to !== '') { $res['<='.$fieldCode] = $to; }
+            return empty($res) ? null : $res;
+
+        case 'number_eq':
+            $v = normalizeNumeric((string)($rule['value'] ?? ''));
+            return $v === null ? null : ['='.$fieldCode => $v];
+        case 'number_more':
+            $v = normalizeNumeric((string)($rule['value'] ?? ''));
+            return $v === null ? null : ['>'.$fieldCode => $v];
+        case 'number_less':
+            $v = normalizeNumeric((string)($rule['value'] ?? ''));
+            return $v === null ? null : ['<'.$fieldCode => $v];
+        case 'number_range':
+            $res = [];
+            $from = normalizeNumeric((string)($rule['from'] ?? ''));
+            $to = normalizeNumeric((string)($rule['to'] ?? ''));
+            if ($from !== null) { $res['>='.$fieldCode] = $from; }
+            if ($to !== null) { $res['<='.$fieldCode] = $to; }
+            return empty($res) ? null : $res;
+    }
+
+    return null;
+}
+
+function getContactIdsByLegacyFilter(array $filter): array
+{
+    $result = [];
+    $rs = \CCrmContact::GetListEx(
+        ['ID' => 'ASC'],
+        $filter,
+        false,
+        false,
+        ['ID']
+    );
+    while ($row = $rs->Fetch())
+    {
+        $id = (int)($row['ID'] ?? 0);
+        if ($id > 0)
+        {
+            $result[] = $id;
+        }
+    }
+
+    return array_values(array_unique($result));
 }
 
 function keepNonRootRules(array $rules, array $gridColumnMap, string $rootNodeId): array
@@ -2004,6 +2302,12 @@ function buildRowsWithNodeItems(array $rootItems, array $nodes, string $rootNode
                 continue;
             }
 
+            if (strtoupper($entityCode) === 'CONTACT')
+            {
+                preloadContactLegacyRows($allIds);
+                preloadContactMultiFields($allIds);
+            }
+
             $selectCandidates = ['ID', 'TITLE', 'NAME', 'LAST_NAME', 'SECOND_NAME', 'COMPANY_TITLE'];
             foreach ((array)($child['selectedFields'] ?? []) as $f)
             {
@@ -2141,26 +2445,53 @@ function getItemFieldValueSafe($item, string $entityCode, string $fieldCode)
         return null;
     }
 
+    $directValue = null;
+    $hasDirectValue = false;
     try
     {
         if (method_exists($item, 'get'))
         {
-            return $item->get($fieldCode);
+            $directValue = $item->get($fieldCode);
+            $hasDirectValue = true;
         }
     }
     catch (\Throwable $e)
     {
-        if (strtoupper($entityCode) === 'CONTACT' && isContactAddressFieldCode($fieldCode))
+    }
+
+    $entityCodeUpper = strtoupper($entityCode);
+    if ($entityCodeUpper === 'CONTACT')
+    {
+        $isEmptyDirect = !$hasDirectValue || stringifyValue($directValue) === '';
+
+        if (isContactAddressFieldCode($fieldCode))
         {
-            $value = getContactAddressFieldValue($item, $fieldCode);
-            if ($value !== null)
+            if ($isEmptyDirect)
             {
-                return $value;
+                $value = getContactAddressFieldValue($item, $fieldCode);
+                if ($value !== null && stringifyValue($value) !== '')
+                {
+                    return $value;
+                }
             }
+            return $directValue;
+        }
+
+        if (isContactCommunicationFieldCode($fieldCode))
+        {
+            if ($isEmptyDirect)
+            {
+                $value = getContactCommunicationFieldValue($item, $fieldCode);
+                if ($value !== null)
+                {
+                    return $value;
+                }
+            }
+            return $directValue;
         }
     }
 
-    return null;
+    return $hasDirectValue ? $directValue : null;
 }
 
 function isContactAddressFieldCode(string $fieldCode): bool
@@ -2182,6 +2513,18 @@ function isContactAddressFieldCode(string $fieldCode): bool
         'REG_ADDRESS_PROVINCE' => true,
         'REG_ADDRESS_COUNTRY' => true,
         'REG_ADDRESS_COUNTRY_CODE' => true,
+    ];
+
+    return !empty($codes[strtoupper($fieldCode)]);
+}
+
+function isContactCommunicationFieldCode(string $fieldCode): bool
+{
+    static $codes = [
+        'PHONE' => true,
+        'EMAIL' => true,
+        'IM' => true,
+        'WEB' => true,
     ];
 
     return !empty($codes[strtoupper($fieldCode)]);
@@ -2217,7 +2560,7 @@ function getContactAddressFieldValue($contactItem, string $fieldCode)
         return null;
     }
 
-    static $contactCache = [];
+    $contactCache = &getContactLegacyCache();
     if (!array_key_exists($contactId, $contactCache))
     {
         $contactCache[$contactId] = \CCrmContact::GetByID($contactId, false) ?: [];
@@ -2225,6 +2568,165 @@ function getContactAddressFieldValue($contactItem, string $fieldCode)
 
     $row = (array)$contactCache[$contactId];
     return $row[$fieldCode] ?? null;
+}
+
+function preloadContactLegacyRows(array $contactIds): void
+{
+    $ids = array_values(array_unique(array_filter(array_map('intval', $contactIds), static function (int $id): bool {
+        return $id > 0;
+    })));
+    if (empty($ids))
+    {
+        return;
+    }
+
+    $cache = &getContactLegacyCache();
+    $needLoad = [];
+    foreach ($ids as $id)
+    {
+        if (!array_key_exists($id, $cache))
+        {
+            $needLoad[] = $id;
+        }
+    }
+    if (empty($needLoad))
+    {
+        return;
+    }
+
+    $rs = \CCrmContact::GetListEx(
+        ['ID' => 'ASC'],
+        ['@ID' => $needLoad],
+        false,
+        false,
+        [
+            'ID',
+            'ADDRESS', 'ADDRESS_2', 'ADDRESS_CITY', 'ADDRESS_POSTAL_CODE', 'ADDRESS_REGION', 'ADDRESS_PROVINCE', 'ADDRESS_COUNTRY', 'ADDRESS_COUNTRY_CODE',
+            'REG_ADDRESS', 'REG_ADDRESS_2', 'REG_ADDRESS_CITY', 'REG_ADDRESS_POSTAL_CODE', 'REG_ADDRESS_REGION', 'REG_ADDRESS_PROVINCE', 'REG_ADDRESS_COUNTRY', 'REG_ADDRESS_COUNTRY_CODE',
+        ]
+    );
+    while ($row = $rs->Fetch())
+    {
+        $id = (int)($row['ID'] ?? 0);
+        if ($id > 0)
+        {
+            $cache[$id] = $row;
+        }
+    }
+
+    foreach ($needLoad as $id)
+    {
+        if (!array_key_exists($id, $cache))
+        {
+            $cache[$id] = [];
+        }
+    }
+}
+
+function getContactCommunicationFieldValue($contactItem, string $fieldCode)
+{
+    if (!method_exists($contactItem, 'getId'))
+    {
+        return null;
+    }
+
+    $contactId = (int)$contactItem->getId();
+    if ($contactId <= 0)
+    {
+        return null;
+    }
+
+    $typeId = strtoupper(trim($fieldCode));
+    if (!in_array($typeId, ['PHONE', 'EMAIL', 'IM', 'WEB'], true))
+    {
+        return null;
+    }
+
+    preloadContactMultiFields([$contactId]);
+    $cache = &getContactMultiFieldCache();
+    $values = (array)($cache[$contactId][$typeId] ?? []);
+    if (empty($values))
+    {
+        return '';
+    }
+
+    return implode(', ', array_values(array_unique(array_filter(array_map('strval', $values), static function (string $v): bool {
+        return trim($v) !== '';
+    }))));
+}
+
+function preloadContactMultiFields(array $contactIds): void
+{
+    $ids = array_values(array_unique(array_filter(array_map('intval', $contactIds), static function (int $id): bool {
+        return $id > 0;
+    })));
+    if (empty($ids))
+    {
+        return;
+    }
+
+    $cache = &getContactMultiFieldCache();
+    $needLoad = [];
+    foreach ($ids as $id)
+    {
+        if (!array_key_exists($id, $cache))
+        {
+            $needLoad[] = $id;
+        }
+    }
+    if (empty($needLoad))
+    {
+        return;
+    }
+
+    foreach ($needLoad as $id)
+    {
+        $cache[$id] = [];
+    }
+
+    if (!class_exists('\CCrmFieldMulti'))
+    {
+        return;
+    }
+
+    $rs = \CCrmFieldMulti::GetListEx(
+        ['ID' => 'ASC'],
+        [
+            '=ENTITY_ID' => 'CONTACT',
+            '@ELEMENT_ID' => $needLoad,
+            '@TYPE_ID' => ['PHONE', 'EMAIL', 'IM', 'WEB'],
+        ],
+        false,
+        false,
+        ['ELEMENT_ID', 'TYPE_ID', 'VALUE']
+    );
+    while ($row = $rs->Fetch())
+    {
+        $contactId = (int)($row['ELEMENT_ID'] ?? 0);
+        $typeId = strtoupper((string)($row['TYPE_ID'] ?? ''));
+        $value = trim((string)($row['VALUE'] ?? ''));
+        if ($contactId <= 0 || $typeId === '' || $value === '')
+        {
+            continue;
+        }
+        if (!isset($cache[$contactId][$typeId]))
+        {
+            $cache[$contactId][$typeId] = [];
+        }
+        $cache[$contactId][$typeId][] = $value;
+    }
+}
+
+function &getContactLegacyCache(): array
+{
+    static $cache = [];
+    return $cache;
+}
+
+function &getContactMultiFieldCache(): array
+{
+    static $cache = [];
+    return $cache;
 }
 
 function shouldRenderAsEntityLink(string $entityCode, string $fieldCode): bool
@@ -2415,6 +2917,7 @@ function normalizeUserId(string $value): int
     }
     return ctype_digit($value) ? (int)$value : 0;
 }
+
 
 function buildUserDisplayName(array $user): string
 {
