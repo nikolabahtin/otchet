@@ -343,7 +343,7 @@ if (!$allowHeavyInMemory)
     $findText = '';
 }
 $rootSelect = collectRootSelectFields($nodes, $rootNodeId);
-$select = array_values(array_unique(array_merge(['ID'], $rootSelect)));
+$select = buildFactorySelectFields($rootFactory, array_values(array_unique(array_merge(['ID'], $rootSelect))));
 
 $queryParams = [
     'select' => $select,
@@ -2204,6 +2204,12 @@ function buildFactorySelectFields($factory, array $candidates): array
         {
             continue;
         }
+        // Синтетические контактные legacy-поля читаем отдельно (fallback),
+        // в ORM select их добавлять нельзя: у Contact Entity их нет.
+        if (isSyntheticContactLegacyField($field))
+        {
+            continue;
+        }
 
         if (empty($available) || isset($available[$field]))
         {
@@ -2217,6 +2223,17 @@ function buildFactorySelectFields($factory, array $candidates): array
     }
 
     return array_values(array_unique($result));
+}
+
+function isSyntheticContactLegacyField(string $fieldCode): bool
+{
+    $fieldCode = strtoupper(trim($fieldCode));
+    if ($fieldCode === '')
+    {
+        return false;
+    }
+
+    return isContactAddressFieldCode($fieldCode) || isContactCommunicationFieldCode($fieldCode);
 }
 
 function buildRowsWithNodeItems(array $rootItems, array $nodes, string $rootNodeId, int $userId): array
