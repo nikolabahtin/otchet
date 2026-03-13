@@ -4,9 +4,12 @@
     const rootEntitySelect = document.getElementById('rootEntitySelect');
     const contactFieldSelect = document.getElementById('contactFieldSelect');
     const saveBtn = document.getElementById('saveTemplateBtn');
-    const openReportBtn = document.getElementById('openReportBtn');
     const templateNameInput = document.getElementById('templateNameInput');
     const formTitle = document.getElementById('sliderFormTitle');
+    const permissionsCard = document.getElementById('permissionsCard');
+    const permSubjectSelector = document.getElementById('permSubjectSelector');
+    const permAssignedList = document.getElementById('permAssignedList');
+    const permReadonlyHint = document.getElementById('permReadonlyHint');
     const relationMenuOverlayId = 'gncRelationMenuOverlay';
 
     const state = {
@@ -22,7 +25,14 @@
         expandedNodes: {},
         fieldSearch: {},
         pendingSearchFocus: null,
-        openRelationMenuNodeId: ''
+        openRelationMenuNodeId: '',
+        permissions: { users: {}, departments: {} },
+        permissionSubjects: { users: {}, departments: {} },
+        permissionsEditable: true,
+        permissionSelectorReady: false,
+        permissionTagSelector: null,
+        permissionSelectorPromise: null,
+        permissionSyncing: false
     };
 
     function request(action, payload) {
@@ -56,6 +66,11 @@
     }
 
     function init() {
+        renderPermissions();
+        ensurePermissionTagSelector().then(function () {
+            state.permissionSelectorReady = true;
+            renderPermissions();
+        });
         Promise.all([
             request('getRootEntities', {}),
             state.templateId ? request('getTemplate', { id: state.templateId }) : Promise.resolve({ status: 'success', data: { item: null } })
@@ -75,6 +90,8 @@
                 return;
             }
 
+            state.permissionsEditable = true;
+            renderPermissions();
             clearTree();
             renderTree();
             renderColumns();
@@ -86,6 +103,17 @@
         templateNameInput.value = template.name || '';
 
         const config = template.config || {};
+        const currentUserId = Number(cfg.currentUserId || 0);
+        const creatorId = Number(template.creatorId || 0);
+        state.permissionsEditable = !!template.canManagePermissions || (!creatorId || !currentUserId || creatorId === currentUserId);
+        state.permissions = normalizePermissions(config.permissions || {});
+        state.permissionSubjects = subjectsFromTemplate(template);
+        renderPermissions();
+        ensurePermissionTagSelector().then(function () {
+            state.permissionSelectorReady = true;
+            renderPermissions();
+        });
+
         state.contactFieldCode = String(config.contactFieldCode || template.contactFieldCode || '');
         if (config.mode === 'tree' && config.rootEntity && Array.isArray(config.nodes) && config.nodes.length) {
             restoreTreeConfig(config);
@@ -163,6 +191,70 @@
         state.pendingSearchFocus = null;
         state.openRelationMenuNodeId = '';
         renderRootSpecialFieldSelectors([]);
+    }
+
+    function normalizePermissions(raw) {
+        const src = raw && typeof raw === 'object' ? raw : {};
+        const usersSrc = src.users && typeof src.users === 'object' ? src.users : {};
+        const departmentsSrc = src.departments && typeof src.departments === 'object' ? src.departments : {};
+        const out = { users: {}, departments: {} };
+
+        Object.keys(usersSrc).forEach(function (id) {
+            const role = normalizeRole(usersSrc[id]);
+            if (role) {
+                out.users[String(parseInt(id, 10))] = role;
+            }
+        });
+        Object.keys(departmentsSrc).forEach(function (id) {
+            const role = normalizeRole(departmentsSrc[id]);
+            if (role) {
+                out.departments[String(parseInt(id, 10))] = role;
+            }
+        });
+
+        return out;
+    }
+
+    function normalizeRole(role) {
+        const value = String(role || '').toLowerCase();
+        if (value === 'view' || value === 'edit' || value === 'delete' || value === 'full') {
+            return value;
+        }
+        return '';
+    }
+
+    function subjectsFromTemplate(template) {
+        const out = { users: {}, departments: {} };
+        const source = template && template.permissionSubjects && typeof template.permissionSubjects === 'object'
+            ? template.permissionSubjects
+            : {};
+
+        const users = Array.isArray(source.users) ? source.users : [];
+        users.forEach(function (item) {
+            const id = String(parseInt(item && item.id, 10) || 0);
+            if (!id || id === '0') {
+                return;
+            }
+            out.users[id] = {
+                id: Number(id),
+                name: String((item && item.name) || ('#' + id)),
+                url: String((item && item.url) || '/company/personal/user/' + id + '/')
+            };
+        });
+
+        const departments = Array.isArray(source.departments) ? source.departments : [];
+        departments.forEach(function (item) {
+            const id = String(parseInt(item && item.id, 10) || 0);
+            if (!id || id === '0') {
+                return;
+            }
+            out.departments[id] = {
+                id: Number(id),
+                name: String((item && item.name) || ('Отдел #' + id))
+            };
+        });
+
+        return out;
     }
 
     function renderRootSelect(selectedCode) {
@@ -902,6 +994,342 @@
         return rows.length;
     }
 
+    function roleLabel(role) {
+        if (role === 'delete') { return 'Удалять'; }
+        if (role === 'edit') { return 'Изменять'; }
+        return 'Пользоваться';
+    }
+
+    function makePermissionSubjectKey(kind, id) {
+        return String(kind) + ':' + String(parseInt(id, 10) || 0);
+    }
+
+    function normalizeSubjectId(rawId) {
+        if (typeof rawId === 'number' && Number.isFinite(rawId)) {
+            return Math.max(0, parseInt(String(rawId), 10) || 0);
+        }
+        const value = String(rawId || '').trim();
+        if (value === '') {
+            return 0;
+        }
+        if (/^\d+$/.test(value)) {
+            return parseInt(value, 10) || 0;
+        }
+        const matched = value.match(/(\d+)/);
+        return matched ? (parseInt(matched[1], 10) || 0) : 0;
+    }
+
+    function parsePermissionSubjectFromTag(tag) {
+        if (!tag) {
+            return null;
+        }
+        const item = tag.getItem ? tag.getItem() : null;
+        const entityId = String(
+            (item && item.getEntityId ? item.getEntityId() : '') ||
+            (tag.getEntityId ? tag.getEntityId() : '')
+        ).toLowerCase();
+        const id = normalizeSubjectId(
+            (item && item.getId ? item.getId() : 0) ||
+            (tag.getId ? tag.getId() : 0)
+        );
+        if (!id) {
+            return null;
+        }
+
+        if (entityId === 'user' || entityId.indexOf('user') >= 0 || entityId.indexOf('employee') >= 0) {
+            return { kind: 'users', id: id };
+        }
+        if (
+            entityId === 'department' ||
+            entityId === 'structure-node' ||
+            entityId.indexOf('department') >= 0 ||
+            entityId.indexOf('structure') >= 0
+        ) {
+            return { kind: 'departments', id: id };
+        }
+        return null;
+    }
+
+    function ensurePermissionTagSelector() {
+        if (!permSubjectSelector || state.permissionTagSelector) {
+            return Promise.resolve(state.permissionTagSelector);
+        }
+        if (state.permissionSelectorPromise) {
+            return state.permissionSelectorPromise;
+        }
+        if (!window.BX || !BX.Runtime) {
+            return Promise.resolve(null);
+        }
+
+        state.permissionSelectorPromise = BX.Runtime.loadExtension('ui.entity-selector').then(function () {
+            if (!BX.UI || !BX.UI.EntitySelector || !BX.UI.EntitySelector.TagSelector) {
+                return null;
+            }
+            if (state.permissionTagSelector) {
+                return state.permissionTagSelector;
+            }
+            permSubjectSelector.innerHTML = '';
+            state.permissionTagSelector = new BX.UI.EntitySelector.TagSelector({
+                id: 'gnc-template-permission-selector',
+                multiple: true,
+                textBoxWidth: '100%',
+                textBoxPlaceholder: 'Выберите сотрудников и отделы',
+                dialogOptions: {
+                    multiple: true,
+                    dropdownMode: true,
+                    enableSearch: true,
+                    entities: [
+                        { id: 'user', options: { intranetUsersOnly: true } },
+                        { id: 'department', options: { selectMode: 'usersAndDepartments' } },
+                        { id: 'structure-node', options: {} }
+                    ]
+                },
+                events: {
+                    onTagAdd: function (event) {
+                        if (state.permissionSyncing) {
+                            return;
+                        }
+                        if (!state.permissionsEditable) {
+                            return;
+                        }
+                        const tag = event.getData().tag;
+                        const subject = parsePermissionSubjectFromTag(tag);
+                        if (!subject) {
+                            return;
+                        }
+
+                        const idKey = String(subject.id);
+                        const role = 'view';
+                        state.permissions[subject.kind][idKey] = role;
+
+                        const title = String(tag.getTitle ? tag.getTitle() : ('#' + idKey));
+                        if (subject.kind === 'users') {
+                            state.permissionSubjects.users[idKey] = {
+                                id: Number(idKey),
+                                name: title,
+                                url: '/company/personal/user/' + idKey + '/'
+                            };
+                        } else {
+                            state.permissionSubjects.departments[idKey] = {
+                                id: Number(idKey),
+                                name: title
+                            };
+                        }
+                        renderPermissions();
+                    },
+                    onTagRemove: function (event) {
+                        if (state.permissionSyncing) {
+                            return;
+                        }
+                        if (!state.permissionsEditable) {
+                            return;
+                        }
+                        const tag = event.getData().tag;
+                        const subject = parsePermissionSubjectFromTag(tag);
+                        if (!subject) {
+                            return;
+                        }
+                        const idKey = String(subject.id);
+                        delete state.permissions[subject.kind][idKey];
+                        renderPermissions();
+                    }
+                }
+            });
+            state.permissionTagSelector.renderTo(permSubjectSelector);
+            return state.permissionTagSelector;
+        }).catch(function () {
+            if (permSubjectSelector) {
+                permSubjectSelector.innerHTML = '<div class="gnc-empty">Не удалось загрузить селектор сотрудников/отделов.</div>';
+            }
+            return null;
+        }).finally(function () {
+            state.permissionSelectorPromise = null;
+        });
+        return state.permissionSelectorPromise;
+    }
+
+    function syncTagsWithPermissions() {
+        if (!state.permissionTagSelector) {
+            return;
+        }
+        const selector = state.permissionTagSelector;
+        const desired = {};
+
+        Object.keys(state.permissions.users || {}).forEach(function (id) {
+            if (!normalizeRole(state.permissions.users[id])) {
+                return;
+            }
+            const key = makePermissionSubjectKey('users', id);
+            desired[key] = {
+                id: Number(id),
+                entityId: 'user',
+                title: String(((state.permissionSubjects.users || {})[id] || {}).name || ('#' + id))
+            };
+        });
+        Object.keys(state.permissions.departments || {}).forEach(function (id) {
+            if (!normalizeRole(state.permissions.departments[id])) {
+                return;
+            }
+            const key = makePermissionSubjectKey('departments', id);
+            desired[key] = {
+                id: Number(id),
+                entityId: 'department',
+                title: String(((state.permissionSubjects.departments || {})[id] || {}).name || ('Отдел #' + id))
+            };
+        });
+
+        state.permissionSyncing = true;
+        try {
+            const tags = selector.getTags();
+            tags.forEach(function (tag) {
+                const subject = parsePermissionSubjectFromTag(tag);
+                if (!subject) {
+                    return;
+                }
+                const key = makePermissionSubjectKey(subject.kind, subject.id);
+                if (!desired[key]) {
+                    selector.removeTag(tag);
+                }
+            });
+
+            Object.keys(desired).forEach(function (key) {
+                const item = desired[key];
+                const exists = selector.getTags().some(function (tag) {
+                    const subject = parsePermissionSubjectFromTag(tag);
+                    if (!subject) {
+                        return false;
+                    }
+                    return makePermissionSubjectKey(subject.kind, subject.id) === key;
+                });
+                if (!exists) {
+                    selector.addTag({
+                        id: item.id,
+                        entityId: item.entityId,
+                        title: item.title
+                    });
+                }
+            });
+        } finally {
+            state.permissionSyncing = false;
+        }
+    }
+
+    function renderPermissions() {
+        const editable = !!state.permissionsEditable;
+        if (permissionsCard) {
+            if (state.templateId && !editable) {
+                permissionsCard.style.display = 'none';
+                return;
+            }
+            permissionsCard.style.display = '';
+        }
+        if (permReadonlyHint) {
+            permReadonlyHint.style.display = editable ? 'none' : '';
+        }
+        if (state.permissionTagSelector && typeof state.permissionTagSelector.setReadonly === 'function') {
+            state.permissionTagSelector.setReadonly(!editable);
+        }
+
+        if (permAssignedList) {
+            permAssignedList.innerHTML = '';
+            const rows = [];
+            Object.keys(state.permissions.users || {}).forEach(function (id) {
+                const role = normalizeRole(state.permissions.users[id]);
+                if (!role) {
+                    return;
+                }
+                const subject = ((state.permissionSubjects || {}).users || {})[id] || {};
+                rows.push({
+                    kind: 'users',
+                    id: id,
+                    role: role,
+                    name: String(subject.name || ('#' + id)),
+                    url: String(subject.url || '/company/personal/user/' + id + '/')
+                });
+            });
+            Object.keys(state.permissions.departments || {}).forEach(function (id) {
+                const role = normalizeRole(state.permissions.departments[id]);
+                if (!role) {
+                    return;
+                }
+                const subject = ((state.permissionSubjects || {}).departments || {})[id] || {};
+                rows.push({
+                    kind: 'departments',
+                    id: id,
+                    role: role,
+                    name: String(subject.name || ('Отдел #' + id)),
+                    url: ''
+                });
+            });
+
+            if (!rows.length) {
+                permAssignedList.innerHTML = '<div class="gnc-empty">Права не назначены</div>';
+            } else {
+                rows.forEach(function (rowData) {
+                    const row = document.createElement('div');
+                    row.className = 'gnc-perm-item';
+
+                    const name = document.createElement('div');
+                    name.className = 'gnc-perm-item-name';
+                    if (rowData.kind === 'users') {
+                        const link = document.createElement('a');
+                        link.href = rowData.url;
+                        link.target = '_blank';
+                        link.textContent = rowData.name;
+                        name.appendChild(link);
+                    } else {
+                        name.textContent = rowData.name;
+                    }
+                    row.appendChild(name);
+
+                    const roleSelect = document.createElement('select');
+                    roleSelect.className = 'gnc-perm-item-role';
+                    roleSelect.disabled = !editable;
+                    [
+                        { id: 'view', title: 'Пользоваться' },
+                        { id: 'edit', title: 'Изменять' },
+                        { id: 'delete', title: 'Удалять' },
+                        { id: 'full', title: 'Полный доступ' }
+                    ].forEach(function (opt) {
+                        const option = document.createElement('option');
+                        option.value = opt.id;
+                        option.textContent = opt.title;
+                        option.selected = rowData.role === opt.id;
+                        roleSelect.appendChild(option);
+                    });
+                    roleSelect.addEventListener('change', function () {
+                        if (!state.permissionsEditable) {
+                            return;
+                        }
+                        const role = normalizeRole(roleSelect.value) || 'view';
+                        state.permissions[rowData.kind][rowData.id] = role;
+                        renderPermissions();
+                    });
+                    row.appendChild(roleSelect);
+
+                    const removeBtn = document.createElement('button');
+                    removeBtn.type = 'button';
+                    removeBtn.className = 'gnc-perm-item-remove';
+                    removeBtn.textContent = '×';
+                    removeBtn.disabled = !editable;
+                    removeBtn.title = 'Удалить право';
+                    removeBtn.addEventListener('click', function () {
+                        if (!state.permissionsEditable) {
+                            return;
+                        }
+                        delete state.permissions[rowData.kind][rowData.id];
+                        renderPermissions();
+                    });
+                    row.appendChild(removeBtn);
+
+                    permAssignedList.appendChild(row);
+                });
+            }
+        }
+
+        syncTagsWithPermissions();
+    }
+
     function collectConfig() {
         const nodes = Object.keys(state.nodes).map(function (id) {
             const node = state.nodes[id];
@@ -921,7 +1349,11 @@
             rootEntity: state.rootEntityCode,
             contactFieldCode: state.contactFieldCode,
             columnOrder: state.columnOrder.slice(),
-            nodes: nodes
+            nodes: nodes,
+            permissions: {
+                users: Object.assign({}, state.permissions.users),
+                departments: Object.assign({}, state.permissions.departments)
+            }
         };
     }
 
@@ -988,15 +1420,6 @@
     });
     if (saveBtn) {
         saveBtn.addEventListener('click', saveTemplate);
-    }
-    if (openReportBtn) {
-        openReportBtn.addEventListener('click', function () {
-            if (!state.templateId) {
-                alert('Сначала сохраните шаблон');
-                return;
-            }
-            window.location.href = '/local/otchet/report.php?id=' + encodeURIComponent(String(state.templateId));
-        });
     }
 
     init();

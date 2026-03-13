@@ -1,7 +1,7 @@
 <?php
 require $_SERVER['DOCUMENT_ROOT'].'/bitrix/header.php';
 $APPLICATION->SetTitle('GNC Export - Настройка шаблона');
-$assetVersion = '20260225-01';
+$assetVersion = '20260309-10';
 ?>
 <div class="gnc-slider-page">
     <script>
@@ -42,7 +42,6 @@ $assetVersion = '20260225-01';
             <h2 id="sliderFormTitle">Новый шаблон</h2>
             <div class="gnc-slider-page-actions">
                 <a href="/local/otchet/index.php" class="ui-btn ui-btn-light-border">Отмена</a>
-                <button type="button" class="ui-btn ui-btn-light-border" id="openReportBtn">Сформировать отчет</button>
                 <button type="button" class="ui-btn ui-btn-primary" id="saveTemplateBtn">Сохранить</button>
             </div>
         </div>
@@ -57,6 +56,23 @@ $assetVersion = '20260225-01';
             <select id="rootEntitySelect"></select>
         </div>
 
+        <section class="gnc-permissions-card" id="permissionsCard">
+            <h3>Права доступа к шаблону</h3>
+            <p>Выберите сотрудников и/или отделы штатным селектором Битрикс. Для каждого назначьте роль: пользоваться, изменять, удалять или полный доступ.</p>
+
+            <div class="gnc-perm-single">
+                <label>Сотрудники и отделы</label>
+                <div class="gnc-perm-selector ui-ctl ui-ctl-textbox ui-ctl-w100">
+                    <div id="permSubjectSelector"></div>
+                </div>
+                <div id="permAssignedList" class="gnc-perm-list"></div>
+            </div>
+
+            <div id="permReadonlyHint" class="gnc-perm-readonly" style="display:none;">
+                Права доступа может менять только создатель шаблона.
+            </div>
+        </section>
+
         <p>Отмечайте поля для колонок. Связанные сущности выбираются через значок связи в заголовке каждого блока.</p>
         <div id="entityTree" class="gnc-levels"></div>
     </section>
@@ -68,7 +84,8 @@ $assetVersion = '20260225-01';
         sessid: '<?=bitrix_sessid()?>',
         ajaxUrl: '/local/otchet/ajax.php',
         templateId: '<?=htmlspecialcharsbx((string)($_GET['id'] ?? ''))?>',
-        listUrl: '/local/otchet/index.php'
+        listUrl: '/local/otchet/index.php',
+        currentUserId: <?= (int)$USER->GetID() ?>
     };
 </script>
 <script src="/local/otchet/assets/slider.js?v=<?=$assetVersion?>"></script>

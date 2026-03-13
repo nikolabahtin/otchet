@@ -79,6 +79,18 @@ try
             $payload = getEntityMeta($entityCode);
             break;
 
+        case 'searchUsers':
+            $query = trim((string)$request->getPost('query'));
+            $limit = (int)$request->getPost('limit');
+            $payload = ['items' => searchUsersForPermissions($query, $limit > 0 ? $limit : 20)];
+            break;
+
+        case 'searchDepartments':
+            $query = trim((string)$request->getPost('query'));
+            $limit = (int)$request->getPost('limit');
+            $payload = ['items' => searchDepartmentsForPermissions($query, $limit > 0 ? $limit : 20)];
+            break;
+
         case 'searchEntityItems':
             $entityCode = (string)$request->getPost('entityCode');
             $query = trim((string)$request->getPost('query'));
@@ -230,6 +242,7 @@ function listTemplatesFile(int $userId): array
     $pattern = $dir.'/u'.$userId.'_*.json';
     $files = glob($pattern) ?: [];
     $items = [];
+    $creatorIds = [];
 
     foreach ($files as $file)
     {
@@ -249,8 +262,30 @@ function listTemplatesFile(int $userId): array
             'id' => (string)($data['id'] ?? ''),
             'name' => (string)($data['name'] ?? ''),
             'updatedAt' => (string)($data['updatedAt'] ?? ''),
+            'creatorId' => (int)($data['userId'] ?? $userId),
+            'updatedById' => (int)($data['updatedById'] ?? ($data['userId'] ?? $userId)),
+            'canView' => true,
+            'canEdit' => true,
+            'canDelete' => true,
+            'canManagePermissions' => true,
         ];
+        $creatorIds[] = (int)($data['userId'] ?? $userId);
     }
+
+    $creatorMap = getUsersMapByIds($creatorIds);
+    foreach ($items as &$item)
+    {
+        $creatorId = (int)($item['creatorId'] ?? 0);
+        $creator = $creatorId > 0 ? (array)($creatorMap[$creatorId] ?? []) : [];
+        $item['creatorName'] = (string)($creator['name'] ?? ('#'.$creatorId));
+        $item['creatorProfileUrl'] = $creatorId > 0 ? '/company/personal/user/'.$creatorId.'/' : '';
+        $updatedById = (int)($item['updatedById'] ?? 0);
+        $updatedBy = $updatedById > 0 ? (array)($creatorMap[$updatedById] ?? []) : [];
+        $item['updatedByName'] = (string)($updatedBy['name'] ?? ('#'.$updatedById));
+        $item['updatedByProfileUrl'] = $updatedById > 0 ? '/company/personal/user/'.$updatedById.'/' : '';
+        $item['updatedByDiffers'] = $updatedById > 0 && $creatorId > 0 && $updatedById !== $creatorId;
+    }
+    unset($item);
 
     usort($items, static function ($a, $b) {
         return strcmp((string)$b['updatedAt'], (string)$a['updatedAt']);
@@ -279,23 +314,65 @@ function getTemplateFile(int $userId, string $id): ?array
     }
 
     $data = Json::decode($json);
-    return is_array($data) ? $data : null;
+    if (!is_array($data))
+    {
+        return null;
+    }
+    $data['creatorId'] = (int)($data['userId'] ?? $userId);
+    $creatorMap = $data['creatorId'] > 0 ? getUsersMapByIds([(int)$data['creatorId']]) : [];
+    $creator = $data['creatorId'] > 0 ? (array)($creatorMap[(int)$data['creatorId']] ?? []) : [];
+    $data['creatorName'] = (string)($creator['name'] ?? ('#'.$data['creatorId']));
+    $data['creatorProfileUrl'] = $data['creatorId'] > 0 ? '/company/personal/user/'.$data['creatorId'].'/' : '';
+    $data['canView'] = true;
+    $data['canEdit'] = true;
+    $data['canDelete'] = true;
+    $data['canManagePermissions'] = true;
+    $data['updatedById'] = (int)($data['updatedById'] ?? $data['creatorId']);
+    $updatedByMap = $data['updatedById'] > 0 ? getUsersMapByIds([(int)$data['updatedById']]) : [];
+    $updatedBy = $data['updatedById'] > 0 ? (array)($updatedByMap[(int)$data['updatedById']] ?? []) : [];
+    $data['updatedByName'] = (string)($updatedBy['name'] ?? ('#'.$data['updatedById']));
+    $data['updatedByProfileUrl'] = $data['updatedById'] > 0 ? '/company/personal/user/'.$data['updatedById'].'/' : '';
+    $data['updatedByDiffers'] = $data['updatedById'] > 0 && $data['creatorId'] > 0 && $data['updatedById'] !== $data['creatorId'];
+    $config = is_array($data['config'] ?? null) ? $data['config'] : [];
+    $data['permissionSubjects'] = buildPermissionSubjectsFromConfig($config);
+    return $data;
 }
 
 function saveTemplateFile(int $userId, string $id, string $name, array $config): array
 {
     $id = $id !== '' ? $id : uniqid('tpl_', true);
     $now = (new DateTime())->toString();
+    $creatorId = $userId;
+    $existingFile = getStorageDir().'/u'.$userId.'_'.$id.'.json';
+    if (is_file($existingFile))
+    {
+        $raw = file_get_contents($existingFile);
+        if ($raw !== false)
+        {
+            try
+            {
+                $existing = Json::decode($raw);
+                if (is_array($existing))
+                {
+                    $creatorId = (int)($existing['userId'] ?? $creatorId);
+                }
+            }
+            catch (\Throwable $e)
+            {
+            }
+        }
+    }
 
     $payload = [
         'id' => $id,
-        'userId' => $userId,
+        'userId' => $creatorId,
         'name' => $name,
         'updatedAt' => $now,
+        'updatedById' => $userId,
         'config' => $config,
     ];
 
-    $file = getStorageDir().'/u'.$userId.'_'.$id.'.json';
+    $file = getStorageDir().'/u'.$creatorId.'_'.$id.'.json';
     file_put_contents($file, Json::encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
 
     return $payload;
@@ -349,21 +426,78 @@ function listTemplatesHl(int $userId): array
 {
     $dataClass = getPresetDataClass();
     $rows = $dataClass::getList([
-        'filter' => ['=UF_USER_ID' => $userId],
+        'filter' => ['=UF_ACTIVE' => 1],
         'order' => ['UF_UPDATED_AT' => 'DESC', 'ID' => 'DESC'],
-        'select' => ['ID', 'UF_NAME', 'UF_UPDATED_AT'],
+        'select' => ['ID', 'UF_NAME', 'UF_UPDATED_AT', 'UF_USER_ID', 'UF_CONFIG_JSON'],
     ])->fetchAll();
 
+    $userDepartments = getCurrentUserDepartmentIds($userId);
+    $creatorIds = [];
+    $updatedByIds = [];
     $result = [];
     foreach ($rows as $row)
     {
+        $permission = resolveTemplatePermission($row, $userId, $userDepartments);
+        if ($permission['canView'] !== true)
+        {
+            continue;
+        }
+
+        $creatorId = (int)($row['UF_USER_ID'] ?? 0);
+        if ($creatorId > 0)
+        {
+            $creatorIds[] = $creatorId;
+        }
+        $config = [];
+        if (!empty($row['UF_CONFIG_JSON']))
+        {
+            try
+            {
+                $decoded = Json::decode((string)$row['UF_CONFIG_JSON']);
+                $config = is_array($decoded) ? $decoded : [];
+            }
+            catch (\Throwable $e)
+            {
+            }
+        }
+        $updatedById = (int)($config['__meta']['updatedByUserId'] ?? 0);
+        if ($updatedById <= 0)
+        {
+            $updatedById = $creatorId;
+        }
+        if ($updatedById > 0)
+        {
+            $updatedByIds[] = $updatedById;
+        }
         $updatedAt = $row['UF_UPDATED_AT'];
         $result[] = [
             'id' => (string)$row['ID'],
             'name' => (string)($row['UF_NAME'] ?? ''),
             'updatedAt' => $updatedAt instanceof DateTime ? $updatedAt->toString() : (string)$updatedAt,
+            'creatorId' => $creatorId,
+            'updatedById' => $updatedById,
+            'canView' => true,
+            'canEdit' => (bool)$permission['canEdit'],
+            'canDelete' => (bool)$permission['canDelete'],
+            'canManagePermissions' => (bool)$permission['canManagePermissions'],
         ];
     }
+
+    $creatorMap = getUsersMapByIds($creatorIds);
+    $updatedByMap = getUsersMapByIds($updatedByIds);
+    foreach ($result as &$item)
+    {
+        $creatorId = (int)($item['creatorId'] ?? 0);
+        $creator = $creatorId > 0 ? (array)($creatorMap[$creatorId] ?? []) : [];
+        $item['creatorName'] = (string)($creator['name'] ?? ('#'.$creatorId));
+        $item['creatorProfileUrl'] = $creatorId > 0 ? '/company/personal/user/'.$creatorId.'/' : '';
+        $updatedById = (int)($item['updatedById'] ?? 0);
+        $updatedBy = $updatedById > 0 ? (array)($updatedByMap[$updatedById] ?? []) : [];
+        $item['updatedByName'] = (string)($updatedBy['name'] ?? ('#'.$updatedById));
+        $item['updatedByProfileUrl'] = $updatedById > 0 ? '/company/personal/user/'.$updatedById.'/' : '';
+        $item['updatedByDiffers'] = $updatedById > 0 && $creatorId > 0 && $updatedById !== $creatorId;
+    }
+    unset($item);
 
     return $result;
 }
@@ -378,7 +512,12 @@ function getTemplateHl(int $userId, string $id): ?array
 
     $dataClass = getPresetDataClass();
     $row = $dataClass::getById($templateId)->fetch();
-    if (!$row || (int)$row['UF_USER_ID'] !== $userId)
+    if (!$row)
+    {
+        return null;
+    }
+    $permission = resolveTemplatePermission($row, $userId, getCurrentUserDepartmentIds($userId));
+    if (!$permission['canView'])
     {
         return null;
     }
@@ -396,12 +535,34 @@ function getTemplateHl(int $userId, string $id): ?array
     }
 
     $updatedAt = $row['UF_UPDATED_AT'];
+    $creatorId = (int)($row['UF_USER_ID'] ?? 0);
+    $creatorMap = $creatorId > 0 ? getUsersMapByIds([$creatorId]) : [];
+    $creator = $creatorId > 0 ? (array)($creatorMap[$creatorId] ?? []) : [];
+    $updatedById = (int)($config['__meta']['updatedByUserId'] ?? 0);
+    if ($updatedById <= 0)
+    {
+        $updatedById = $creatorId;
+    }
+    $updatedByMap = $updatedById > 0 ? getUsersMapByIds([$updatedById]) : [];
+    $updatedBy = $updatedById > 0 ? (array)($updatedByMap[$updatedById] ?? []) : [];
     return [
         'id' => (string)$row['ID'],
         'name' => (string)($row['UF_NAME'] ?? ''),
         'updatedAt' => $updatedAt instanceof DateTime ? $updatedAt->toString() : (string)$updatedAt,
+        'creatorId' => $creatorId,
+        'creatorName' => (string)($creator['name'] ?? ('#'.$creatorId)),
+        'creatorProfileUrl' => $creatorId > 0 ? '/company/personal/user/'.$creatorId.'/' : '',
+        'updatedById' => $updatedById,
+        'updatedByName' => (string)($updatedBy['name'] ?? ('#'.$updatedById)),
+        'updatedByProfileUrl' => $updatedById > 0 ? '/company/personal/user/'.$updatedById.'/' : '',
+        'updatedByDiffers' => $updatedById > 0 && $creatorId > 0 && $updatedById !== $creatorId,
+        'canView' => (bool)$permission['canView'],
+        'canEdit' => (bool)$permission['canEdit'],
+        'canDelete' => (bool)$permission['canDelete'],
+        'canManagePermissions' => (bool)$permission['canManagePermissions'],
         'contactFieldCode' => $storedContactField,
         'config' => $config,
+        'permissionSubjects' => buildPermissionSubjectsFromConfig($config),
     ];
 }
 
@@ -415,23 +576,63 @@ function saveTemplateHl(int $userId, string $id, string $name, array $config): a
     $entityTypeId = extractEntityTypeIdFromCode($rootEntityCode);
     $contactField = (string)($config['contactFieldCode'] ?? '');
 
-    $payload = [
-        'UF_NAME' => $name,
-        'UF_USER_ID' => $userId,
-        'UF_ACTIVE' => 1,
-        'UF_ENTITY_TYPE_ID' => $entityTypeId,
-        'UF_CONTACT_FIELD' => $contactField,
-        'UF_CONFIG_JSON' => Json::encode($config, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
-        'UF_UPDATED_AT' => $now,
-    ];
+    $ownerIdForSave = $userId;
 
     if ($templateId > 0)
     {
         $existing = $dataClass::getById($templateId)->fetch();
-        if (!$existing || (int)$existing['UF_USER_ID'] !== $userId)
+        if (!$existing)
         {
             throw new RuntimeException('Template not found');
         }
+        $permission = resolveTemplatePermission($existing, $userId, getCurrentUserDepartmentIds($userId));
+        if (!$permission['canEdit'])
+        {
+            throw new RuntimeException('Недостаточно прав для изменения шаблона');
+        }
+        $ownerId = (int)($existing['UF_USER_ID'] ?? 0);
+        $ownerIdForSave = $ownerId > 0 ? $ownerId : $ownerIdForSave;
+        if (!$permission['canManagePermissions'])
+        {
+            $existingConfig = [];
+            if (!empty($existing['UF_CONFIG_JSON']))
+            {
+                try
+                {
+                    $decoded = Json::decode((string)$existing['UF_CONFIG_JSON']);
+                    $existingConfig = is_array($decoded) ? $decoded : [];
+                }
+                catch (\Throwable $e)
+                {
+                }
+            }
+            if (isset($existingConfig['permissions']))
+            {
+                $config['permissions'] = $existingConfig['permissions'];
+            }
+            else
+            {
+                unset($config['permissions']);
+            }
+        }
+        $meta = is_array($config['__meta'] ?? null) ? $config['__meta'] : [];
+        $meta['updatedByUserId'] = $userId;
+        $meta['updatedAt'] = $now->toString();
+        if (!isset($meta['createdByUserId']) && $ownerIdForSave > 0)
+        {
+            $meta['createdByUserId'] = $ownerIdForSave;
+        }
+        $config['__meta'] = $meta;
+
+        $payload = [
+            'UF_NAME' => $name,
+            'UF_USER_ID' => $ownerIdForSave,
+            'UF_ACTIVE' => 1,
+            'UF_ENTITY_TYPE_ID' => $entityTypeId,
+            'UF_CONTACT_FIELD' => $contactField,
+            'UF_CONFIG_JSON' => Json::encode($config, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+            'UF_UPDATED_AT' => $now,
+        ];
 
         $result = $dataClass::update($templateId, $payload);
         if (!$result->isSuccess())
@@ -441,6 +642,20 @@ function saveTemplateHl(int $userId, string $id, string $name, array $config): a
     }
     else
     {
+        $meta = is_array($config['__meta'] ?? null) ? $config['__meta'] : [];
+        $meta['createdByUserId'] = $ownerIdForSave;
+        $meta['updatedByUserId'] = $userId;
+        $meta['updatedAt'] = $now->toString();
+        $config['__meta'] = $meta;
+        $payload = [
+            'UF_NAME' => $name,
+            'UF_USER_ID' => $ownerIdForSave,
+            'UF_ACTIVE' => 1,
+            'UF_ENTITY_TYPE_ID' => $entityTypeId,
+            'UF_CONTACT_FIELD' => $contactField,
+            'UF_CONFIG_JSON' => Json::encode($config, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+            'UF_UPDATED_AT' => $now,
+        ];
         $payload['UF_CREATED_AT'] = $now;
         $payload['UF_IS_DEFAULT'] = 0;
         $result = $dataClass::add($payload);
@@ -470,9 +685,14 @@ function deleteTemplateHl(int $userId, string $id): void
 
     $dataClass = getPresetDataClass();
     $existing = $dataClass::getById($templateId)->fetch();
-    if (!$existing || (int)$existing['UF_USER_ID'] !== $userId)
+    if (!$existing)
     {
         throw new RuntimeException('Template not found');
+    }
+    $permission = resolveTemplatePermission($existing, $userId, getCurrentUserDepartmentIds($userId));
+    if (!$permission['canDelete'])
+    {
+        throw new RuntimeException('Недостаточно прав для удаления шаблона');
     }
 
     $result = $dataClass::delete($templateId);
@@ -480,6 +700,347 @@ function deleteTemplateHl(int $userId, string $id): void
     {
         throw new RuntimeException(implode('; ', $result->getErrorMessages()));
     }
+}
+
+function resolveTemplatePermission(array $row, int $userId, array $userDepartments): array
+{
+    $ownerId = (int)($row['UF_USER_ID'] ?? 0);
+    if ($ownerId > 0 && $ownerId === $userId)
+    {
+        return ['canView' => true, 'canEdit' => true, 'canDelete' => true, 'canManagePermissions' => true, 'role' => 'owner'];
+    }
+
+    $config = [];
+    if (!empty($row['UF_CONFIG_JSON']))
+    {
+        try
+        {
+            $decoded = Json::decode((string)$row['UF_CONFIG_JSON']);
+            $config = is_array($decoded) ? $decoded : [];
+        }
+        catch (\Throwable $e)
+        {
+        }
+    }
+    $permissions = is_array($config['permissions'] ?? null) ? $config['permissions'] : [];
+    $users = is_array($permissions['users'] ?? null) ? $permissions['users'] : [];
+    $departments = is_array($permissions['departments'] ?? null) ? $permissions['departments'] : [];
+
+    $maxRank = 0;
+    $userRole = (string)($users[(string)$userId] ?? '');
+    $maxRank = max($maxRank, getTemplateRoleRank($userRole));
+    foreach ($userDepartments as $departmentId)
+    {
+        $role = (string)($departments[(string)$departmentId] ?? '');
+        $maxRank = max($maxRank, getTemplateRoleRank($role));
+    }
+
+    return [
+        'canView' => $maxRank >= 1,
+        'canEdit' => $maxRank >= 2,
+        'canDelete' => $maxRank >= 3,
+        'canManagePermissions' => $maxRank >= 4,
+        'role' => $maxRank >= 4 ? 'full' : ($maxRank >= 3 ? 'delete' : ($maxRank >= 2 ? 'edit' : ($maxRank >= 1 ? 'view' : 'none'))),
+    ];
+}
+
+function getTemplateRoleRank(string $role): int
+{
+    $role = strtolower(trim($role));
+    if ($role === 'full')
+    {
+        return 4;
+    }
+    if ($role === 'delete')
+    {
+        return 3;
+    }
+    if ($role === 'edit')
+    {
+        return 2;
+    }
+    if ($role === 'view')
+    {
+        return 1;
+    }
+    return 0;
+}
+
+function getCurrentUserDepartmentIds(int $userId): array
+{
+    $userId = (int)$userId;
+    if ($userId <= 0)
+    {
+        return [];
+    }
+
+    $rs = \CUser::GetByID($userId);
+    $user = $rs ? $rs->Fetch() : false;
+    if (!$user)
+    {
+        return [];
+    }
+
+    $raw = $user['UF_DEPARTMENT'] ?? [];
+    if (!is_array($raw))
+    {
+        $raw = $raw !== '' ? [$raw] : [];
+    }
+
+    return array_values(array_unique(array_filter(array_map('intval', $raw), static function (int $id): bool {
+        return $id > 0;
+    })));
+}
+
+function getUsersMapByIds(array $userIds): array
+{
+    $ids = array_values(array_unique(array_filter(array_map('intval', $userIds), static function (int $id): bool {
+        return $id > 0;
+    })));
+    if (empty($ids))
+    {
+        return [];
+    }
+
+    $map = [];
+    $rs = \CUser::GetList(
+        ($by = 'id'),
+        ($order = 'asc'),
+        ['@ID' => implode('|', $ids)],
+        ['FIELDS' => ['ID', 'NAME', 'LAST_NAME', 'SECOND_NAME', 'LOGIN']]
+    );
+    while ($user = $rs->Fetch())
+    {
+        $id = (int)($user['ID'] ?? 0);
+        if ($id <= 0)
+        {
+            continue;
+        }
+        $name = trim(implode(' ', array_filter([
+            (string)($user['LAST_NAME'] ?? ''),
+            (string)($user['NAME'] ?? ''),
+            (string)($user['SECOND_NAME'] ?? ''),
+        ], static function ($part): bool {
+            return trim((string)$part) !== '';
+        })));
+        if ($name === '')
+        {
+            $name = (string)($user['LOGIN'] ?? ('#'.$id));
+        }
+        $map[$id] = ['id' => $id, 'name' => $name];
+    }
+
+    return $map;
+}
+
+function getDepartmentIblockId(): int
+{
+    if (!Loader::includeModule('intranet'))
+    {
+        return 0;
+    }
+
+    $iblockId = (int)\COption::GetOptionInt('intranet', 'iblock_structure', 0);
+    return $iblockId > 0 ? $iblockId : 0;
+}
+
+function getDepartmentsMapByIds(array $departmentIds): array
+{
+    $ids = array_values(array_unique(array_filter(array_map('intval', $departmentIds), static function (int $id): bool {
+        return $id > 0;
+    })));
+    if (empty($ids))
+    {
+        return [];
+    }
+    if (!Loader::includeModule('iblock'))
+    {
+        return [];
+    }
+
+    $map = [];
+    $rs = \CIBlockSection::GetList(
+        ['LEFT_MARGIN' => 'ASC'],
+        ['ID' => $ids, 'CHECK_PERMISSIONS' => 'N'],
+        false,
+        ['ID', 'NAME']
+    );
+    while ($row = $rs->Fetch())
+    {
+        $id = (int)($row['ID'] ?? 0);
+        if ($id <= 0)
+        {
+            continue;
+        }
+        $map[$id] = [
+            'id' => $id,
+            'name' => trim((string)($row['NAME'] ?? '')),
+        ];
+    }
+
+    return $map;
+}
+
+function buildPermissionSubjectsFromConfig(array $config): array
+{
+    $permissions = is_array($config['permissions'] ?? null) ? $config['permissions'] : [];
+    $usersRaw = is_array($permissions['users'] ?? null) ? $permissions['users'] : [];
+    $departmentsRaw = is_array($permissions['departments'] ?? null) ? $permissions['departments'] : [];
+
+    $userIds = [];
+    foreach ($usersRaw as $userId => $role)
+    {
+        $id = (int)$userId;
+        if ($id > 0 && getTemplateRoleRank((string)$role) > 0)
+        {
+            $userIds[] = $id;
+        }
+    }
+    $departmentIds = [];
+    foreach ($departmentsRaw as $departmentId => $role)
+    {
+        $id = (int)$departmentId;
+        if ($id > 0 && getTemplateRoleRank((string)$role) > 0)
+        {
+            $departmentIds[] = $id;
+        }
+    }
+
+    $userMap = getUsersMapByIds($userIds);
+    $departmentMap = getDepartmentsMapByIds($departmentIds);
+
+    $users = [];
+    foreach ($usersRaw as $userId => $role)
+    {
+        $id = (int)$userId;
+        if ($id <= 0 || getTemplateRoleRank((string)$role) <= 0)
+        {
+            continue;
+        }
+        $user = (array)($userMap[$id] ?? []);
+        $users[] = [
+            'id' => $id,
+            'role' => (string)$role,
+            'name' => (string)($user['name'] ?? ('#'.$id)),
+            'url' => '/company/personal/user/'.$id.'/',
+        ];
+    }
+
+    $departments = [];
+    foreach ($departmentsRaw as $departmentId => $role)
+    {
+        $id = (int)$departmentId;
+        if ($id <= 0 || getTemplateRoleRank((string)$role) <= 0)
+        {
+            continue;
+        }
+        $department = (array)($departmentMap[$id] ?? []);
+        $departments[] = [
+            'id' => $id,
+            'role' => (string)$role,
+            'name' => (string)($department['name'] ?? ('Отдел #'.$id)),
+        ];
+    }
+
+    return [
+        'users' => $users,
+        'departments' => $departments,
+    ];
+}
+
+function searchUsersForPermissions(string $query, int $limit = 20): array
+{
+    $limit = max(1, min(100, $limit));
+    $filter = ['ACTIVE' => 'Y'];
+    if ($query !== '')
+    {
+        $filter['FIND'] = $query;
+    }
+
+    $result = [];
+    $rs = \CUser::GetList(
+        ($by = 'last_name'),
+        ($order = 'asc'),
+        $filter,
+        ['FIELDS' => ['ID', 'NAME', 'LAST_NAME', 'SECOND_NAME', 'LOGIN'], 'SELECT' => []]
+    );
+    while ($user = $rs->Fetch())
+    {
+        $id = (int)($user['ID'] ?? 0);
+        if ($id <= 0)
+        {
+            continue;
+        }
+        $name = trim(implode(' ', array_filter([
+            (string)($user['LAST_NAME'] ?? ''),
+            (string)($user['NAME'] ?? ''),
+            (string)($user['SECOND_NAME'] ?? ''),
+        ], static function ($part): bool {
+            return trim((string)$part) !== '';
+        })));
+        if ($name === '')
+        {
+            $name = (string)($user['LOGIN'] ?? ('#'.$id));
+        }
+        $result[] = [
+            'id' => $id,
+            'name' => $name,
+            'url' => '/company/personal/user/'.$id.'/',
+        ];
+
+        if (count($result) >= $limit)
+        {
+            break;
+        }
+    }
+
+    return $result;
+}
+
+function searchDepartmentsForPermissions(string $query, int $limit = 20): array
+{
+    $limit = max(1, min(100, $limit));
+    if (!Loader::includeModule('iblock'))
+    {
+        return [];
+    }
+
+    $filter = ['ACTIVE' => 'Y', 'CHECK_PERMISSIONS' => 'N'];
+    $departmentIblockId = getDepartmentIblockId();
+    if ($departmentIblockId > 0)
+    {
+        $filter['IBLOCK_ID'] = $departmentIblockId;
+    }
+    if ($query !== '')
+    {
+        $filter['%NAME'] = $query;
+    }
+
+    $result = [];
+    $rs = \CIBlockSection::GetList(
+        ['LEFT_MARGIN' => 'ASC'],
+        $filter,
+        false,
+        ['ID', 'NAME']
+    );
+    while ($row = $rs->Fetch())
+    {
+        $id = (int)($row['ID'] ?? 0);
+        if ($id <= 0)
+        {
+            continue;
+        }
+        $result[] = [
+            'id' => $id,
+            'name' => trim((string)($row['NAME'] ?? ('Отдел #'.$id))),
+        ];
+        if (count($result) >= $limit)
+        {
+            break;
+        }
+    }
+
+    return $result;
 }
 
 function extractEntityTypeIdFromCode(string $entityCode): int

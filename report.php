@@ -22,6 +22,7 @@ global $APPLICATION, $USER;
 
 $templateId = (string)($_GET['id'] ?? '');
 $userId = (int)($USER ? $USER->GetID() : 0);
+$canViewDebugLogs = (bool)($USER && method_exists($USER, 'IsAdmin') && $USER->IsAdmin());
 
 if ($userId <= 0)
 {
@@ -52,7 +53,7 @@ safeLoadUiExtensions([
     'ui',
 ]);
 
-$template = loadTemplateData($templateId, $userId, true);
+$template = loadTemplateData($templateId, $userId, false);
 if (!$template)
 {
     echo '<div class="ui-alert ui-alert-danger"><span class="ui-alert-message">Шаблон не найден.</span></div>';
@@ -175,11 +176,14 @@ foreach ($templateColumns as $col)
     $isNumeric = !empty($meta['isNumeric']);
     $isBoolean = !empty($meta['isBoolean']);
     $isEmployee = !empty($meta['isEmployee']);
+    $isParentReference = !empty($meta['isParentReference']);
+    $parentEntityTypeId = (int)($meta['parentEntityTypeId'] ?? 0);
     $isMultiple = !empty($meta['isMultiple']);
     $enumItems = is_array($meta['enumItems'] ?? null) ? $meta['enumItems'] : [];
 
     $type = 'string';
-    if ($isDate) { $type = 'date'; }
+    if ($isParentReference && $parentEntityTypeId > 0) { $type = 'dest_selector'; }
+    elseif ($isDate) { $type = 'date'; }
     elseif ($isEmployee) { $type = 'dest_selector'; }
     elseif (!empty($enumItems) || $isBoolean) { $type = 'list'; }
     elseif ($isNumeric) { $type = 'number'; }
@@ -224,6 +228,35 @@ foreach ($templateColumns as $col)
             $entry['PARAMS'] = ['multiple' => 'Y'];
         }
     }
+    elseif ($type === 'dest_selector' && $isParentReference && $parentEntityTypeId > 0)
+    {
+        $ctx = 'GNC_OTCHET_PARENT_'.$columnId;
+        $dynCode = 'DYNAMICS_'.$parentEntityTypeId;
+        $destParams = [
+            'multiple' => $isMultiple ? 'Y' : 'N',
+            'context' => $ctx,
+            'contextCode' => 'CRM',
+            'apiVersion' => 3,
+            'enableCrm' => 'Y',
+            'convertJson' => 'Y',
+            'enableUsers' => 'N',
+            'enableDepartments' => 'N',
+            'allowAddUser' => 'N',
+            'allowAddCrmContact' => 'N',
+            'allowAddSocNetGroup' => 'N',
+            'allowSearchCrmEmailUsers' => 'N',
+            'allowSearchNetworkUsers' => 'N',
+            'addTabCrmContacts' => 'N',
+            'addTabCrmCompanies' => 'N',
+            'addTabCrmLeads' => 'N',
+            'addTabCrmDeals' => 'N',
+            'enableCrmDynamics' => [$parentEntityTypeId => 'Y'],
+            'addTabCrmDynamics' => [$parentEntityTypeId => 'N'],
+            'crmDynamicTitles' => [$dynCode => 'DYNAMIC_'.$parentEntityTypeId],
+        ];
+        $entry['params'] = $destParams;
+        $entry['PARAMS'] = $destParams;
+    }
     elseif ($type === 'dest_selector')
     {
         $destParams = [
@@ -246,7 +279,9 @@ foreach ($templateColumns as $col)
         'type' => $type,
         'isDate' => $isDate,
         'isNumeric' => $isNumeric,
+        'isBoolean' => $isBoolean,
         'isEmployee' => $isEmployee,
+        'isParentReference' => $isParentReference,
         'isSyntheticAddress' => $isSyntheticAddress,
         'entityCode' => $entityCode,
         'fieldCode' => $fieldCode,
@@ -294,9 +329,17 @@ if (!empty($rawSort))
     $sortNodeId = (string)($sortCol['nodeId'] ?? '');
     $sortFieldCode = (string)($sortCol['fieldCode'] ?? '');
 
+    $canUseOrmSort = false;
     if ($sortNodeId !== '' && $sortNodeId === $rootNodeId && $sortFieldCode !== '')
     {
-        $ormSort = [$sortFieldCode => $sortDir];
+        $safeSortField = strtoupper($sortFieldCode);
+        $allowedSortFields = buildFactorySelectFields($rootFactory, [$safeSortField]);
+        $canUseOrmSort = in_array($safeSortField, $allowedSortFields, true);
+    }
+
+    if ($canUseOrmSort)
+    {
+        $ormSort = [strtoupper($sortFieldCode) => $sortDir];
     }
     else
     {
@@ -607,7 +650,9 @@ if ($isExportExcel)
 </style>
 
 <div class="ui-page-slider-workarea otchet-report2-layout">
+    <?php if ($canViewDebugLogs): ?>
     <pre id="reportDbgBox" class="otchet-report2-debug"><?=htmlspecialcharsbx(Json::encode($debugPayload, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT))?></pre>
+    <?php endif; ?>
 
     <div class="otchet-report2-filter-row">
         <div class="otchet-report2-filter-wrap">
@@ -626,6 +671,7 @@ if ($isExportExcel)
             ?>
         </div>
         <div class="otchet-report2-toolbar">
+            <?php if ($canViewDebugLogs): ?>
             <span class="otchet-report2-logs-label">Логи</span>
             <label class="ui-switcher ui-switcher-checked" id="reportDebugToggleWrap">
                 <input type="checkbox" class="ui-switcher-checkbox" id="reportDebugToggle" checked>
@@ -633,8 +679,11 @@ if ($isExportExcel)
                 <span class="ui-switcher-disabled">Выкл</span>
                 <span class="ui-switcher-toggle"></span>
             </label>
+            <?php endif; ?>
             <a class="ui-btn ui-btn-light-border" href="/local/otchet/index.php">Назад к шаблонам</a>
+            <?php if (!empty($template['canEdit'])): ?>
             <a class="ui-btn ui-btn-light-border" href="/local/otchet/slider.php?id=<?=urlencode((string)$template['id'])?>">Корректировать шаблон</a>
+            <?php endif; ?>
             <a class="ui-btn ui-btn-primary" id="exportExcelLink" href="/local/otchet/report.php?id=<?=urlencode((string)$template['id'])?>&export=excel">Выгрузить в Excel</a>
         </div>
     </div>
@@ -677,6 +726,46 @@ if ($isExportExcel)
     <script>
         (function () {
             var waitNode = null;
+            function buildYearRangeOptions(selectedValue) {
+                var selected = String(selectedValue || '');
+                var options = ['<option value="">Год</option>'];
+                for (var year = 2100; year >= 1900; year--) {
+                    var value = String(year);
+                    var selectedAttr = (value === selected) ? ' selected' : '';
+                    options.push('<option value="' + value + '"' + selectedAttr + '>' + value + '</option>');
+                }
+                return options.join('');
+            }
+            function patchDateYearSelects() {
+                var root = document;
+                var yearSelects = root.querySelectorAll(
+                    '.main-ui-filter-popup select[name$="_year"], ' +
+                    '.main-ui-filter-popup select[id$="_year"], ' +
+                    '.main-ui-filter-popup select[data-name$="_year"]'
+                );
+                yearSelects.forEach(function (select) {
+                    var current = String(select.value || '');
+                    // Не трогаем, если диапазон уже широкий.
+                    if (select.options && select.options.length > 120) {
+                        return;
+                    }
+                    select.innerHTML = buildYearRangeOptions(current);
+                    if (current !== '') {
+                        select.value = current;
+                    }
+                });
+            }
+            function installDateYearPatchWatcher() {
+                patchDateYearSelects();
+                var observer = new MutationObserver(function () {
+                    patchDateYearSelects();
+                });
+                observer.observe(document.body, { childList: true, subtree: true });
+                document.addEventListener('click', function () {
+                    setTimeout(patchDateYearSelects, 0);
+                    setTimeout(patchDateYearSelects, 120);
+                }, true);
+            }
             function showBitrixWait() {
                 if (!window.BX || typeof BX.showWait !== 'function') { return; }
                 if (waitNode) { return; }
@@ -691,6 +780,7 @@ if ($isExportExcel)
 
             document.addEventListener('DOMContentLoaded', hideBitrixWait);
             window.addEventListener('pageshow', hideBitrixWait);
+            document.addEventListener('DOMContentLoaded', installDateYearPatchWatcher);
 
             var dbgBox = document.getElementById('reportDbgBox');
             var dbgToggle = document.getElementById('reportDebugToggle');
@@ -846,7 +936,8 @@ function loadTemplateFromHl(string $templateId, int $userId, bool $allowAnyUser 
         return null;
     }
 
-    if (!$allowAnyUser && (int)($row['UF_USER_ID'] ?? 0) !== $userId)
+    $permission = resolveTemplatePermissionByRowForReport($row, $userId);
+    if (!$allowAnyUser && !$permission['canView'])
     {
         return null;
     }
@@ -862,7 +953,108 @@ function loadTemplateFromHl(string $templateId, int $userId, bool $allowAnyUser 
         'id' => (string)$row['ID'],
         'name' => (string)($row['UF_NAME'] ?? ''),
         'config' => $config,
+        'canView' => (bool)$permission['canView'],
+        'canEdit' => (bool)$permission['canEdit'],
+        'canDelete' => (bool)$permission['canDelete'],
+        'canManagePermissions' => (bool)$permission['canManagePermissions'],
     ];
+}
+
+function hasTemplateViewPermissionByRow(array $row, int $userId): bool
+{
+    $permission = resolveTemplatePermissionByRowForReport($row, $userId);
+    return (bool)$permission['canView'];
+}
+
+function resolveTemplatePermissionByRowForReport(array $row, int $userId): array
+{
+    $ownerId = (int)($row['UF_USER_ID'] ?? 0);
+    if ($ownerId > 0 && $ownerId === $userId)
+    {
+        return [
+            'canView' => true,
+            'canEdit' => true,
+            'canDelete' => true,
+            'canManagePermissions' => true,
+        ];
+    }
+
+    $config = [];
+    if (!empty($row['UF_CONFIG_JSON']))
+    {
+        try
+        {
+            $decoded = Json::decode((string)$row['UF_CONFIG_JSON']);
+            $config = is_array($decoded) ? $decoded : [];
+        }
+        catch (\Throwable $e)
+        {
+        }
+    }
+    $permissions = is_array($config['permissions'] ?? null) ? $config['permissions'] : [];
+    $users = is_array($permissions['users'] ?? null) ? $permissions['users'] : [];
+    $departments = is_array($permissions['departments'] ?? null) ? $permissions['departments'] : [];
+
+    $rank = getTemplateRoleRankForReport((string)($users[(string)$userId] ?? ''));
+    $userDepartments = getCurrentUserDepartmentIdsForReport($userId);
+    foreach ($userDepartments as $departmentId)
+    {
+        $rank = max($rank, getTemplateRoleRankForReport((string)($departments[(string)$departmentId] ?? '')));
+    }
+
+    return [
+        'canView' => $rank >= 1,
+        'canEdit' => $rank >= 2,
+        'canDelete' => $rank >= 3,
+        'canManagePermissions' => $rank >= 4,
+    ];
+}
+
+function getTemplateRoleRankForReport(string $role): int
+{
+    $role = strtolower(trim($role));
+    if ($role === 'full')
+    {
+        return 4;
+    }
+    if ($role === 'delete')
+    {
+        return 3;
+    }
+    if ($role === 'edit')
+    {
+        return 2;
+    }
+    if ($role === 'view')
+    {
+        return 1;
+    }
+    return 0;
+}
+
+function getCurrentUserDepartmentIdsForReport(int $userId): array
+{
+    if ($userId <= 0)
+    {
+        return [];
+    }
+
+    $rs = \CUser::GetByID($userId);
+    $user = $rs ? $rs->Fetch() : false;
+    if (!$user)
+    {
+        return [];
+    }
+
+    $raw = $user['UF_DEPARTMENT'] ?? [];
+    if (!is_array($raw))
+    {
+        $raw = $raw !== '' ? [$raw] : [];
+    }
+
+    return array_values(array_unique(array_filter(array_map('intval', $raw), static function (int $id): bool {
+        return $id > 0;
+    })));
 }
 
 function loadTemplateFromFile(string $templateId, int $userId, bool $allowAnyUser = false): ?array
@@ -899,6 +1091,10 @@ function loadTemplateFromFile(string $templateId, int $userId, bool $allowAnyUse
         'id' => (string)($decoded['id'] ?? $templateId),
         'name' => (string)($decoded['name'] ?? ''),
         'config' => is_array($decoded['config'] ?? null) ? $decoded['config'] : [],
+        'canView' => true,
+        'canEdit' => true,
+        'canDelete' => true,
+        'canManagePermissions' => true,
     ];
 }
 
@@ -1017,8 +1213,14 @@ function getEntityFieldMetaMap(string $entityCode): array
                 }
             }
         }
+        if (empty($enumItems))
+        {
+            $enumItems = getCrmStatusEnumItemsForField($field, $entityCode, $code);
+        }
 
         $upper = strtoupper($code);
+        $parentEntityTypeId = parseParentEntityTypeIdFromFieldCode($upper);
+        $isParentReference = $parentEntityTypeId > 0;
         $isDate = in_array($type, ['date', 'datetime'], true)
             || strpos($upper, 'DATE') !== false
             || strpos($upper, 'TIME') !== false
@@ -1028,11 +1230,19 @@ function getEntityFieldMetaMap(string $entityCode): array
             || strpos($upper, 'SUM') !== false
             || strpos($upper, 'KURS') !== false
             || strpos($upper, 'OPPORTUNITY') !== false;
+        if ($isParentReference)
+        {
+            $isNumeric = false;
+        }
         $isBoolean = $type === 'boolean' || $userTypeId === 'boolean';
         $isEmployee = $userTypeId === 'employee'
             || $type === 'user'
             || in_array($upper, ['CREATED_BY', 'UPDATED_BY', 'ASSIGNED_BY_ID', 'LAST_ACTIVITY_BY'], true)
             || substr($upper, -8) === '_BY_ID';
+        if ($isParentReference)
+        {
+            $isEmployee = false;
+        }
 
         $result[$code] = [
             'code' => $code,
@@ -1043,6 +1253,8 @@ function getEntityFieldMetaMap(string $entityCode): array
             'isNumeric' => $isNumeric,
             'isBoolean' => $isBoolean,
             'isEmployee' => $isEmployee,
+            'isParentReference' => $isParentReference,
+            'parentEntityTypeId' => $parentEntityTypeId,
             'isMultiple' => $isMultiple,
             'enumItems' => $enumItems,
         ];
@@ -1120,6 +1332,84 @@ function getEntityFieldMetaMap(string $entityCode): array
     return $result;
 }
 
+function getCrmStatusEnumItemsForField($field, string $entityCode, string $fieldCode): array
+{
+    if (!class_exists('\CCrmStatus'))
+    {
+        return [];
+    }
+
+    $entityCode = strtoupper(trim($entityCode));
+    $fieldCode = strtoupper(trim($fieldCode));
+    $statusEntityId = '';
+
+    if ($fieldCode === 'SOURCE_ID')
+    {
+        $statusEntityId = 'SOURCE';
+    }
+    elseif ($fieldCode === 'STATUS_ID' && $entityCode === 'LEAD')
+    {
+        $statusEntityId = 'STATUS';
+    }
+    elseif ($fieldCode === 'TYPE_ID' && $entityCode === 'CONTACT')
+    {
+        $statusEntityId = 'CONTACT_TYPE';
+    }
+    elseif ($fieldCode === 'TYPE_ID' && $entityCode === 'COMPANY')
+    {
+        $statusEntityId = 'COMPANY_TYPE';
+    }
+    elseif ($fieldCode === 'INDUSTRY')
+    {
+        $statusEntityId = 'INDUSTRY';
+    }
+    elseif ($fieldCode === 'EMPLOYEES')
+    {
+        $statusEntityId = 'EMPLOYEES';
+    }
+
+    if ($statusEntityId === '' && is_object($field) && method_exists($field, 'getSettings'))
+    {
+        $settings = (array)$field->getSettings();
+        foreach (['STATUS_TYPE', 'STATUS_ENTITY_ID', 'CRM_STATUS_TYPE', 'STATUS_ID'] as $k)
+        {
+            $v = strtoupper(trim((string)($settings[$k] ?? '')));
+            if ($v !== '')
+            {
+                $statusEntityId = $v;
+                break;
+            }
+        }
+    }
+
+    if ($statusEntityId === '')
+    {
+        return [];
+    }
+
+    try
+    {
+        $items = (array)\CCrmStatus::GetStatusListEx($statusEntityId);
+    }
+    catch (\Throwable $e)
+    {
+        return [];
+    }
+
+    $result = [];
+    foreach ($items as $id => $name)
+    {
+        $id = (string)$id;
+        if ($id === '')
+        {
+            continue;
+        }
+        $result[$id] = (string)$name;
+    }
+
+    return $result;
+}
+
 function buildTemplateColumns(array $config, array $metaByEntity): array
 {
     $nodes = is_array($config['nodes'] ?? null) ? $config['nodes'] : [];
@@ -1187,6 +1477,17 @@ function buildTemplateColumns(array $config, array $metaByEntity): array
     }
 
     return $result;
+}
+
+function parseParentEntityTypeIdFromFieldCode(string $fieldCode): int
+{
+    $fieldCode = strtoupper(trim($fieldCode));
+    if (preg_match('/^PARENT_ID_(\d+)$/', $fieldCode, $m))
+    {
+        return (int)$m[1];
+    }
+
+    return 0;
 }
 
 function collectRootSelectFields(array $nodes, string $rootNodeId): array
@@ -1304,6 +1605,7 @@ function buildDynamicFilterRules(array $filterValues, array $columnFilterMap): a
 
         $isDate = !empty($meta['isDate']);
         $isNumeric = !empty($meta['isNumeric']);
+        $isBoolean = !empty($meta['isBoolean']);
         $isEmployee = !empty($meta['isEmployee']);
         if ($isDate)
         {
@@ -1372,6 +1674,38 @@ function buildDynamicFilterRules(array $filterValues, array $columnFilterMap): a
             if (!empty($employeeValues))
             {
                 $rules[] = ['columnId' => $columnId, 'type' => 'employee_in', 'values' => $employeeValues];
+            }
+            continue;
+        }
+
+        if ($isBoolean)
+        {
+            $rawBool = $filterValues[$columnId] ?? null;
+            $states = [];
+            if (is_array($rawBool))
+            {
+                foreach ($rawBool as $v)
+                {
+                    $state = normalizeBooleanFilterState((string)$v);
+                    if ($state !== null)
+                    {
+                        $states[] = $state;
+                    }
+                }
+            }
+            else
+            {
+                $state = normalizeBooleanFilterState((string)$rawBool);
+                if ($state !== null)
+                {
+                    $states[] = $state;
+                }
+            }
+
+            $states = array_values(array_unique($states));
+            if (!empty($states))
+            {
+                $rules[] = ['columnId' => $columnId, 'type' => 'bool_in', 'values' => $states];
             }
             continue;
         }
@@ -1448,13 +1782,80 @@ function buildOrmFilterByRootColumns(array $filterValues, array $columnFilterMap
 
         $isDate = !empty($meta['isDate']);
         $isNumeric = !empty($meta['isNumeric']);
+        $isBoolean = !empty($meta['isBoolean']);
         $isEmployee = !empty($meta['isEmployee']);
+        $isParentReference = !empty($meta['isParentReference']);
+
+        if ($isParentReference)
+        {
+            $raw = $filterValues[$columnId] ?? null;
+            $ids = [];
+            if (is_array($raw))
+            {
+                foreach ($raw as $v)
+                {
+                    $ids = array_merge($ids, extractEntityIdsFromRelationValue($v));
+                }
+            }
+            else
+            {
+                $ids = extractEntityIdsFromRelationValue($raw);
+            }
+            $ids = array_values(array_unique(array_filter(array_map('intval', $ids), static function (int $id): bool {
+                return $id > 0;
+            })));
+            if (!empty($ids))
+            {
+                $filter[(count($ids) > 1 ? '@' : '=') . $fieldCode] = count($ids) > 1 ? $ids : $ids[0];
+            }
+            continue;
+        }
 
         if ($isDate)
         {
             [$from, $to] = resolveDateRangeFromFilterField($filterValues, $columnId);
             if ($from !== '') { $filter['>='.$fieldCode] = $from; }
             if ($to !== '') { $filter['<='.$fieldCode] = $to; }
+            continue;
+        }
+
+        if ($isBoolean)
+        {
+            $rawBool = $filterValues[$columnId] ?? null;
+            $states = [];
+            if (is_array($rawBool))
+            {
+                foreach ($rawBool as $v)
+                {
+                    $state = normalizeBooleanFilterState((string)$v);
+                    if ($state !== null)
+                    {
+                        $states[] = $state;
+                    }
+                }
+            }
+            else
+            {
+                $state = normalizeBooleanFilterState((string)$rawBool);
+                if ($state !== null)
+                {
+                    $states[] = $state;
+                }
+            }
+            $states = array_values(array_unique($states));
+            if (!empty($states))
+            {
+                $values = [];
+                foreach ($states as $state)
+                {
+                    $values = array_merge($values, expandBooleanOrmValues($state));
+                }
+                $values = array_values(array_unique(array_map('strval', $values)));
+                if (!empty($values))
+                {
+                    $filter['@'.$fieldCode] = $values;
+                }
+            }
             continue;
         }
 
@@ -1667,6 +2068,26 @@ function mapRuleToOrmCondition(array $rule, string $fieldCode, bool $isEmployeeF
             }
             return [((count($values) > 1) ? '@' : '=') . $fieldCode => count($values) > 1 ? $values : $values[0]];
 
+        case 'bool_in':
+            $states = array_values(array_unique(array_filter(array_map(static function ($v): ?string {
+                return normalizeBooleanFilterState((string)$v);
+            }, (array)($rule['values'] ?? [])))));
+            if (empty($states))
+            {
+                return null;
+            }
+            $values = [];
+            foreach ($states as $state)
+            {
+                $values = array_merge($values, expandBooleanOrmValues($state));
+            }
+            $values = array_values(array_unique(array_map('strval', $values)));
+            if (empty($values))
+            {
+                return null;
+            }
+            return ['@'.$fieldCode => $values];
+
         case 'date_range':
             $res = [];
             $from = trim((string)($rule['from'] ?? ''));
@@ -1819,6 +2240,29 @@ function applyDynamicRulesToRows(array $rows, array $rules, string $findText = '
                 }
 
                 if (!$matched)
+                {
+                    $ok = false;
+                    break;
+                }
+            }
+            elseif ($type === 'bool_in')
+            {
+                $states = array_values(array_unique(array_filter(array_map(static function ($v): ?string {
+                    return normalizeBooleanFilterState((string)$v);
+                }, (array)($rule['values'] ?? [])))));
+
+                if (empty($states))
+                {
+                    continue;
+                }
+
+                $candidate = normalizeBooleanFilterState($rawValue !== '' ? $rawValue : $value);
+                if ($candidate === null)
+                {
+                    $ok = false;
+                    break;
+                }
+                if (!in_array($candidate, $states, true))
                 {
                     $ok = false;
                     break;
@@ -2814,6 +3258,36 @@ function stringifyValue($value): string
 
     if (is_object($value))
     {
+        if ($value instanceof \JsonSerializable)
+        {
+            try
+            {
+                return stringifyValue($value->jsonSerialize());
+            }
+            catch (\Throwable $e)
+            {
+            }
+        }
+        if (method_exists($value, 'toArray'))
+        {
+            try
+            {
+                return stringifyValue((array)$value->toArray());
+            }
+            catch (\Throwable $e)
+            {
+            }
+        }
+        if (method_exists($value, 'getAmount'))
+        {
+            try
+            {
+                return trim((string)$value->getAmount());
+            }
+            catch (\Throwable $e)
+            {
+            }
+        }
         if (method_exists($value, 'getValue'))
         {
             return stringifyValue($value->getValue());
@@ -2833,11 +3307,27 @@ function formatValueForOutput($value, array $meta): string
     $enumItems = is_array($meta['enumItems'] ?? null) ? $meta['enumItems'] : [];
     $isBoolean = !empty($meta['isBoolean']);
     $isEmployee = !empty($meta['isEmployee']);
+    $isParentReference = !empty($meta['isParentReference']);
     $userTypeId = strtolower((string)($meta['userTypeId'] ?? ''));
     $isMoney = strtolower((string)($meta['type'] ?? '')) === 'money' || $userTypeId === 'money';
 
     if (is_array($value))
     {
+        if ($isMoney)
+        {
+            if (array_key_exists('VALUE', $value))
+            {
+                return stripMoneySuffix(trim((string)$value['VALUE']));
+            }
+            if (array_key_exists('AMOUNT', $value))
+            {
+                return stripMoneySuffix(trim((string)$value['AMOUNT']));
+            }
+            if (array_key_exists('SUM', $value))
+            {
+                return stripMoneySuffix(trim((string)$value['SUM']));
+            }
+        }
         $parts = [];
         foreach ($value as $part)
         {
@@ -2852,6 +3342,39 @@ function formatValueForOutput($value, array $meta): string
 
     if (is_object($value))
     {
+        if ($isMoney)
+        {
+            if ($value instanceof \JsonSerializable)
+            {
+                try
+                {
+                    return formatValueForOutput($value->jsonSerialize(), $meta);
+                }
+                catch (\Throwable $e)
+                {
+                }
+            }
+            if (method_exists($value, 'toArray'))
+            {
+                try
+                {
+                    return formatValueForOutput((array)$value->toArray(), $meta);
+                }
+                catch (\Throwable $e)
+                {
+                }
+            }
+            if (method_exists($value, 'getAmount'))
+            {
+                try
+                {
+                    return stripMoneySuffix(trim((string)$value->getAmount()));
+                }
+                catch (\Throwable $e)
+                {
+                }
+            }
+        }
         if (method_exists($value, 'getValue'))
         {
             return formatValueForOutput($value->getValue(), $meta);
@@ -2899,12 +3422,133 @@ function formatValueForOutput($value, array $meta): string
         }
     }
 
+    if ($isParentReference)
+    {
+        $fieldCode = (string)($meta['code'] ?? '');
+        $parentId = (int)$scalar;
+        if ($parentId > 0 && $fieldCode !== '')
+        {
+            $title = getParentItemDisplayTitleByField($fieldCode, $parentId);
+            if ($title !== '')
+            {
+                return $title;
+            }
+        }
+    }
+
     if ($isMoney)
     {
         return stripMoneySuffix($scalar);
     }
 
     return $scalar;
+}
+
+function getParentItemDisplayTitleByField(string $fieldCode, int $itemId): string
+{
+    $itemId = (int)$itemId;
+    if ($itemId <= 0)
+    {
+        return '';
+    }
+
+    $entityTypeId = parseParentEntityTypeIdFromFieldCode($fieldCode);
+    if ($entityTypeId <= 0)
+    {
+        return '';
+    }
+
+    $cacheKey = $entityTypeId.':'.$itemId;
+    static $cache = [];
+    if (array_key_exists($cacheKey, $cache))
+    {
+        return $cache[$cacheKey];
+    }
+
+    $entityCode = resolveEntityCodeByTypeId($entityTypeId);
+    if ($entityCode === '')
+    {
+        $cache[$cacheKey] = '';
+        return '';
+    }
+
+    $factory = getFactoryByCode($entityCode);
+    if (!$factory)
+    {
+        $cache[$cacheKey] = '';
+        return '';
+    }
+
+    $userId = 1;
+    if (isset($GLOBALS['USER']) && is_object($GLOBALS['USER']) && method_exists($GLOBALS['USER'], 'GetID'))
+    {
+        $uid = (int)$GLOBALS['USER']->GetID();
+        if ($uid > 0)
+        {
+            $userId = $uid;
+        }
+    }
+
+    $select = buildFactorySelectFields($factory, ['ID', 'TITLE', 'NAME', 'LAST_NAME', 'SECOND_NAME', 'COMPANY_TITLE']);
+    $items = getItemsSafe($factory, [
+        'select' => $select,
+        'filter' => ['=ID' => $itemId],
+        'limit' => 1,
+    ], $userId);
+    $item = is_array($items) && !empty($items) ? $items[0] : null;
+    if (!is_object($item))
+    {
+        $cache[$cacheKey] = '';
+        return '';
+    }
+
+    $title = '';
+    $rawTitle = stringifyValue(getItemFieldValueSafe($item, $entityCode, 'TITLE'));
+    if ($rawTitle !== '')
+    {
+        $title = $rawTitle;
+    }
+    else
+    {
+        $name = trim(stringifyValue(getItemFieldValueSafe($item, $entityCode, 'NAME')));
+        $lastName = trim(stringifyValue(getItemFieldValueSafe($item, $entityCode, 'LAST_NAME')));
+        $secondName = trim(stringifyValue(getItemFieldValueSafe($item, $entityCode, 'SECOND_NAME')));
+        $fullName = trim($lastName.' '.$name.' '.$secondName);
+        if ($fullName !== '')
+        {
+            $title = preg_replace('/\s+/', ' ', $fullName);
+        }
+        else
+        {
+            $title = trim(stringifyValue(getItemFieldValueSafe($item, $entityCode, 'COMPANY_TITLE')));
+        }
+    }
+
+    if ($title === '')
+    {
+        $title = (string)$itemId;
+    }
+
+    $cache[$cacheKey] = $title;
+    return $title;
+}
+
+function resolveEntityCodeByTypeId(int $entityTypeId): string
+{
+    $entityTypeId = (int)$entityTypeId;
+    if ($entityTypeId <= 0)
+    {
+        return '';
+    }
+
+    switch ($entityTypeId)
+    {
+        case 1: return 'LEAD';
+        case 2: return 'DEAL';
+        case 3: return 'CONTACT';
+        case 4: return 'COMPANY';
+        default: return 'DYNAMIC_'.$entityTypeId;
+    }
 }
 
 function splitMultiValueTokens(string $value): array
@@ -2919,6 +3563,41 @@ function splitMultiValueTokens(string $value): array
     return array_values(array_filter(array_map('trim', $parts), static function (string $part): bool {
         return $part !== '';
     }));
+}
+
+function normalizeBooleanFilterState(string $value): ?string
+{
+    $v = mb_strtolower(trim($value));
+    if ($v === '')
+    {
+        return null;
+    }
+
+    if (in_array($v, ['1', 'y', 'yes', 'true', 'да'], true))
+    {
+        return 'Y';
+    }
+    if (in_array($v, ['0', 'n', 'no', 'false', 'нет'], true))
+    {
+        return 'N';
+    }
+
+    return null;
+}
+
+function expandBooleanOrmValues(string $state): array
+{
+    $state = strtoupper(trim($state));
+    if ($state === 'Y')
+    {
+        return ['Y', '1', 1, true];
+    }
+    if ($state === 'N')
+    {
+        return ['N', '0', 0, false];
+    }
+
+    return [];
 }
 
 function normalizeUserId(string $value): int

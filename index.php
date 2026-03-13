@@ -1,7 +1,7 @@
 <?php
 require $_SERVER['DOCUMENT_ROOT'].'/bitrix/header.php';
 $APPLICATION->SetTitle('GNC Export - Шаблоны отчетов');
-$assetVersion = '20260223-7';
+$assetVersion = '20260309-02';
 ?>
 <div class="gnc-page">
     <header class="gnc-hero">

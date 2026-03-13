@@ -34,19 +34,36 @@
             item.className = 'gnc-preset-item';
 
             const left = document.createElement('div');
-            left.innerHTML = '<div class="gnc-preset-name">' + escapeHtml(preset.name) + '</div>' +
-                '<div class="gnc-preset-meta">Обновлен: ' + escapeHtml(preset.updatedAt || '') + '</div>';
+            const creatorName = String(preset.creatorName || ('#' + String(preset.creatorId || '')));
+            const creatorUrl = String(preset.creatorProfileUrl || '');
+            const creatorHtml = creatorUrl
+                ? '<a href="' + escapeHtml(creatorUrl) + '" target="_blank">' + escapeHtml(creatorName) + '</a>'
+                : escapeHtml(creatorName);
+            const updatedByDiffers = preset.updatedByDiffers === true;
+            const updatedByName = String(preset.updatedByName || '');
+            const updatedByUrl = String(preset.updatedByProfileUrl || '');
+            const updatedByHtml = updatedByUrl
+                ? '<a href="' + escapeHtml(updatedByUrl) + '" target="_blank">' + escapeHtml(updatedByName) + '</a>'
+                : escapeHtml(updatedByName);
+            const titleHtml = preset.canView !== false
+                ? '<a class="gnc-preset-name-link" href="#" data-report-id="' + escapeHtml(preset.id) + '">' + escapeHtml(preset.name) + '</a>'
+                : '<span class="gnc-preset-name-link is-disabled">' + escapeHtml(preset.name) + '</span>';
+            const updatedMetaHtml = updatedByDiffers
+                ? '<div class="gnc-preset-meta">Изменил: ' + updatedByHtml + ' · ' + escapeHtml(preset.updatedAt || '') + '</div>'
+                : '<div class="gnc-preset-meta">Обновлен: ' + escapeHtml(preset.updatedAt || '') + '</div>';
+            left.innerHTML = '<div class="gnc-preset-name">' + titleHtml + '</div>' +
+                updatedMetaHtml +
+                '<div class="gnc-preset-meta">Создал: ' + creatorHtml + '</div>';
+            const titleLink = left.querySelector('.gnc-preset-name-link[data-report-id]');
+            if (titleLink) {
+                titleLink.addEventListener('click', function (event) {
+                    event.preventDefault();
+                    openReportSlider(preset.id);
+                });
+            }
 
             const actions = document.createElement('div');
             actions.className = 'gnc-preset-actions';
-
-            const runBtn = document.createElement('button');
-            runBtn.type = 'button';
-            runBtn.className = 'ui-btn ui-btn-success';
-            runBtn.textContent = 'Сформировать отчет';
-            runBtn.addEventListener('click', function () {
-                openReportSlider(preset.id);
-            });
 
             const editBtn = document.createElement('button');
             editBtn.type = 'button';
@@ -70,9 +87,12 @@
                 });
             });
 
-            actions.appendChild(runBtn);
-            actions.appendChild(editBtn);
-            actions.appendChild(deleteBtn);
+            if (preset.canEdit === true) {
+                actions.appendChild(editBtn);
+            }
+            if (preset.canDelete === true) {
+                actions.appendChild(deleteBtn);
+            }
             item.appendChild(left);
             item.appendChild(actions);
             presetListEl.appendChild(item);
