@@ -205,6 +205,7 @@ foreach ($templateColumns as $col)
         'default' => false,
     ];
 
+    
     if ($type === 'list')
     {
         $items = ['' => 'Не указано'];
@@ -3000,7 +3001,7 @@ function getContactAddressFieldValue($contactItem, string $fieldCode)
         try
         {
             $compatible = (array)$contactItem->getCompatibleData();
-            if (array_key_exists($fieldCode, $compatible))
+            if (array_key_exists($fieldCode, $compatible) && stringifyValue($compatible[$fieldCode]) !== '')
             {
                 return $compatible[$fieldCode];
             }
@@ -3021,14 +3022,152 @@ function getContactAddressFieldValue($contactItem, string $fieldCode)
         return null;
     }
 
+    // Сначала пробуем старые адресные поля контакта.
+    preloadContactLegacyRows([$contactId]);
     $contactCache = &getContactLegacyCache();
-    if (!array_key_exists($contactId, $contactCache))
+    $row = (array)($contactCache[$contactId] ?? []);
+    if (array_key_exists($fieldCode, $row) && stringifyValue($row[$fieldCode]) !== '')
     {
-        $contactCache[$contactId] = \CCrmContact::GetByID($contactId, false) ?: [];
+        return $row[$fieldCode];
     }
 
-    $row = (array)$contactCache[$contactId];
+    // Во многих порталах адреса контакта живут в реквизитах, а не в полях контакта.
+    $requisiteValue = getContactRequisiteAddressFieldValue($contactId, $fieldCode);
+    if ($requisiteValue !== null && stringifyValue($requisiteValue) !== '')
+    {
+        return $requisiteValue;
+    }
+
     return $row[$fieldCode] ?? null;
+}
+
+function getContactRequisiteAddressFieldValue(int $contactId, string $fieldCode)
+{
+    if ($contactId <= 0)
+    {
+        return null;
+    }
+
+    preloadContactRequisiteAddresses([$contactId]);
+    $cache = &getContactRequisiteAddressCache();
+    $addressMap = (array)($cache[$contactId] ?? []);
+    if (empty($addressMap))
+    {
+        return null;
+    }
+
+    $isRegistration = strpos($fieldCode, 'REG_') === 0;
+    $baseFieldCode = $isRegistration ? substr($fieldCode, 4) : $fieldCode;
+    $addressFieldMap = [
+        'ADDRESS' => 'ADDRESS_1',
+        'ADDRESS_2' => 'ADDRESS_2',
+        'ADDRESS_CITY' => 'CITY',
+        'ADDRESS_POSTAL_CODE' => 'POSTAL_CODE',
+        'ADDRESS_REGION' => 'REGION',
+        'ADDRESS_PROVINCE' => 'PROVINCE',
+        'ADDRESS_COUNTRY' => 'COUNTRY',
+        'ADDRESS_COUNTRY_CODE' => 'COUNTRY_CODE',
+    ];
+    $addressKey = $addressFieldMap[$baseFieldCode] ?? null;
+    if ($addressKey === null)
+    {
+        return null;
+    }
+
+    $preferredTypeIds = $isRegistration ? [1] : [4, 6, 0];
+    foreach ($preferredTypeIds as $typeId)
+    {
+        $address = (array)($addressMap[$typeId] ?? []);
+        if (array_key_exists($addressKey, $address) && stringifyValue($address[$addressKey]) !== '')
+        {
+            return $address[$addressKey];
+        }
+    }
+
+    if ($isRegistration)
+    {
+        return null;
+    }
+
+    foreach ($addressMap as $typeId => $address)
+    {
+        if ((int)$typeId === 1)
+        {
+            continue;
+        }
+        $address = (array)$address;
+        if (array_key_exists($addressKey, $address) && stringifyValue($address[$addressKey]) !== '')
+        {
+            return $address[$addressKey];
+        }
+    }
+
+    return null;
+}
+
+function preloadContactRequisiteAddresses(array $contactIds): void
+{
+    $ids = array_values(array_unique(array_filter(array_map('intval', $contactIds), static function (int $id): bool {
+        return $id > 0;
+    })));
+    if (empty($ids) || !class_exists('\Bitrix\Crm\EntityRequisite') || !class_exists('\CCrmOwnerType'))
+    {
+        return;
+    }
+
+    $cache = &getContactRequisiteAddressCache();
+    $needLoad = [];
+    foreach ($ids as $id)
+    {
+        if (!array_key_exists($id, $cache))
+        {
+            $needLoad[] = $id;
+        }
+    }
+    if (empty($needLoad))
+    {
+        return;
+    }
+
+    foreach ($needLoad as $id)
+    {
+        $cache[$id] = [];
+    }
+
+    try
+    {
+        $requisite = new \Bitrix\Crm\EntityRequisite();
+        $requisiteList = $requisite->getList([
+            'filter' => [
+                '@ENTITY_ID' => $needLoad,
+                '=ENTITY_TYPE_ID' => \CCrmOwnerType::Contact,
+            ],
+            'select' => ['ID', 'ENTITY_ID'],
+            'order' => ['ID' => 'ASC'],
+        ]);
+        while ($requisiteData = $requisiteList->fetch())
+        {
+            $contactId = (int)($requisiteData['ENTITY_ID'] ?? 0);
+            $requisiteId = (int)($requisiteData['ID'] ?? 0);
+            if ($contactId <= 0 || $requisiteId <= 0)
+            {
+                continue;
+            }
+            $addresses = (array)$requisite->getAddresses($requisiteId);
+            foreach ($addresses as $typeId => $address)
+            {
+                $typeId = (int)$typeId;
+                if ($typeId < 0)
+                {
+                    continue;
+                }
+                $cache[$contactId][$typeId] = (array)$address;
+            }
+        }
+    }
+    catch (\Throwable $e)
+    {
+    }
 }
 
 function preloadContactLegacyRows(array $contactIds): void
@@ -3185,6 +3324,12 @@ function &getContactLegacyCache(): array
 }
 
 function &getContactMultiFieldCache(): array
+{
+    static $cache = [];
+    return $cache;
+}
+
+function &getContactRequisiteAddressCache(): array
 {
     static $cache = [];
     return $cache;
