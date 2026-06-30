@@ -360,6 +360,36 @@ $nav->allowAllRecords(true)->setPageSize($pageSize)->initFromUri();
 
 $filterOptions = new FilterOptions($filterId);
 $filterData = $filterOptions->getFilter([]);
+
+$saveFilterMessage = '';
+$saveFilterError = '';
+if (
+    !$isExportExcel
+    && (string)($_POST['action'] ?? '') === 'save_current_filter'
+    && check_bitrix_sessid()
+)
+{
+    if (empty($template['canEdit']))
+    {
+        $saveFilterError = 'Недостаточно прав для сохранения фильтра в шаблон.';
+    }
+    else
+    {
+        try
+        {
+            $savedFilterValues = normalizeSavedReportFilterValues($filterData);
+            saveTemplateFilterValues((string)$template['id'], $userId, $savedFilterValues);
+            $template = loadTemplateData((string)$template['id'], $userId, false) ?: $template;
+            $config = is_array($template['config'] ?? null) ? $template['config'] : $config;
+            $saveFilterMessage = 'Текущий фильтр сохранен в шаблон.';
+        }
+        catch (\Throwable $e)
+        {
+            $saveFilterError = $e->getMessage();
+        }
+    }
+}
+
 $ormFilter = buildOrmFilterByRootColumns($filterData, $columnFilterMap, $gridColumnMap, $rootNodeId);
 $findText = trim((string)($filterData['FIND'] ?? ''));
 $allDynamicRules = buildDynamicFilterRules($filterData, $columnFilterMap);
@@ -604,6 +634,10 @@ if ($isExportExcel)
     .otchet-report2-toolbar .ui-btn {
         white-space: nowrap;
     }
+    .otchet-report2-save-filter-form {
+        display: inline-flex;
+        margin: 0;
+    }
     .otchet-report2-logs-label {
         color: #70859b;
         font-size: 14px;
@@ -654,6 +688,12 @@ if ($isExportExcel)
     <?php if ($canViewDebugLogs): ?>
     <pre id="reportDbgBox" class="otchet-report2-debug"><?=htmlspecialcharsbx(Json::encode($debugPayload, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT))?></pre>
     <?php endif; ?>
+    <?php if ($saveFilterMessage !== ''): ?>
+        <div class="ui-alert ui-alert-success"><span class="ui-alert-message"><?=htmlspecialcharsbx($saveFilterMessage)?></span></div>
+    <?php endif; ?>
+    <?php if ($saveFilterError !== ''): ?>
+        <div class="ui-alert ui-alert-danger"><span class="ui-alert-message"><?=htmlspecialcharsbx($saveFilterError)?></span></div>
+    <?php endif; ?>
 
     <div class="otchet-report2-filter-row">
         <div class="otchet-report2-filter-wrap">
@@ -684,6 +724,11 @@ if ($isExportExcel)
             <a class="ui-btn ui-btn-light-border" href="/local/otchet/index.php">Назад к шаблонам</a>
             <?php if (!empty($template['canEdit'])): ?>
             <a class="ui-btn ui-btn-light-border" href="/local/otchet/slider.php?id=<?=urlencode((string)$template['id'])?>">Корректировать шаблон</a>
+            <form method="post" action="<?=htmlspecialcharsbx((string)($_SERVER['REQUEST_URI'] ?? ''))?>" class="otchet-report2-save-filter-form">
+                <?=bitrix_sessid_post()?>
+                <input type="hidden" name="action" value="save_current_filter">
+                <button class="ui-btn ui-btn-success" type="submit">Сохранить фильтр в шаблон</button>
+            </form>
             <?php endif; ?>
             <a class="ui-btn ui-btn-primary" id="exportExcelLink" href="/local/otchet/report.php?id=<?=urlencode((string)$template['id'])?>&export=excel">Выгрузить в Excel</a>
         </div>
@@ -904,6 +949,184 @@ function loadTemplateData(string $templateId, int $userId, bool $allowAnyUser = 
     }
 
     return loadTemplateFromFile($templateId, $userId, $allowAnyUser);
+}
+
+function saveTemplateFilterValues(string $templateId, int $userId, array $filterValues): void
+{
+    $templateId = trim($templateId);
+    if ($templateId === '')
+    {
+        throw new RuntimeException('Не передан ID шаблона.');
+    }
+
+    if (saveTemplateFilterValuesHl($templateId, $userId, $filterValues))
+    {
+        return;
+    }
+
+    if (saveTemplateFilterValuesFile($templateId, $userId, $filterValues))
+    {
+        return;
+    }
+
+    throw new RuntimeException('Не удалось сохранить фильтр в шаблон.');
+}
+
+function saveTemplateFilterValuesHl(string $templateId, int $userId, array $filterValues): bool
+{
+    if (!Loader::includeModule('highloadblock'))
+    {
+        return false;
+    }
+
+    $id = (int)$templateId;
+    if ($id <= 0)
+    {
+        return false;
+    }
+
+    $block = HL\HighloadBlockTable::getList([
+        'select' => ['*'],
+        'filter' => ['=TABLE_NAME' => 'gnc_report_presets'],
+        'limit' => 1,
+    ])->fetch();
+    if (!$block)
+    {
+        return false;
+    }
+
+    $entity = HL\HighloadBlockTable::compileEntity($block);
+    $dataClass = $entity->getDataClass();
+    $row = $dataClass::getById($id)->fetch();
+    if (!$row)
+    {
+        return false;
+    }
+
+    $permission = resolveTemplatePermissionByRowForReport($row, $userId);
+    if (!$permission['canEdit'])
+    {
+        throw new RuntimeException('Недостаточно прав для изменения шаблона.');
+    }
+
+    $config = [];
+    if (!empty($row['UF_CONFIG_JSON']))
+    {
+        $decoded = Json::decode((string)$row['UF_CONFIG_JSON']);
+        $config = is_array($decoded) ? $decoded : [];
+    }
+
+    $config['filterValues'] = $filterValues;
+    $config['filterSavedAt'] = (new \Bitrix\Main\Type\DateTime())->toString();
+    $config['filterSavedByUserId'] = $userId;
+
+    $result = $dataClass::update($id, [
+        'UF_CONFIG_JSON' => Json::encode($config, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+        'UF_UPDATED_AT' => new \Bitrix\Main\Type\DateTime(),
+    ]);
+    if (!$result->isSuccess())
+    {
+        throw new RuntimeException(implode('; ', $result->getErrorMessages()));
+    }
+
+    return true;
+}
+
+function saveTemplateFilterValuesFile(string $templateId, int $userId, array $filterValues): bool
+{
+    $baseDir = $_SERVER['DOCUMENT_ROOT'].'/local/otchet/storage/templates';
+    $file = $baseDir.'/u'.$userId.'_'.$templateId.'.json';
+    if (!is_file($file))
+    {
+        $matches = glob($baseDir.'/u*_'.$templateId.'.json') ?: [];
+        $file = !empty($matches) ? (string)$matches[0] : $file;
+    }
+
+    if (!is_file($file))
+    {
+        return false;
+    }
+
+    $raw = file_get_contents($file);
+    if ($raw === false)
+    {
+        return false;
+    }
+
+    $data = Json::decode($raw);
+    if (!is_array($data))
+    {
+        return false;
+    }
+
+    $config = is_array($data['config'] ?? null) ? $data['config'] : [];
+    $config['filterValues'] = $filterValues;
+    $config['filterSavedAt'] = (new \Bitrix\Main\Type\DateTime())->toString();
+    $config['filterSavedByUserId'] = $userId;
+    $data['config'] = $config;
+    $data['updatedAt'] = (new \Bitrix\Main\Type\DateTime())->toString();
+    $data['updatedById'] = $userId;
+
+    file_put_contents($file, Json::encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), LOCK_EX);
+
+    return true;
+}
+
+function normalizeSavedReportFilterValues(array $filterValues): array
+{
+    $ignoredKeys = [
+        'FILTER_ID' => true,
+        'FILTER_APPLIED' => true,
+        'PRESET_ID' => true,
+        'FILTER_PRESET_ID' => true,
+    ];
+
+    $result = [];
+    foreach ($filterValues as $key => $value)
+    {
+        $key = (string)$key;
+        if ($key === '' || isset($ignoredKeys[$key]))
+        {
+            continue;
+        }
+
+        $normalized = normalizeSavedReportFilterValue($value);
+        if ($normalized === null)
+        {
+            continue;
+        }
+
+        $result[$key] = $normalized;
+    }
+
+    return $result;
+}
+
+function normalizeSavedReportFilterValue($value)
+{
+    if (is_array($value))
+    {
+        $result = [];
+        foreach ($value as $key => $item)
+        {
+            $normalized = normalizeSavedReportFilterValue($item);
+            if ($normalized !== null)
+            {
+                $result[$key] = $normalized;
+            }
+        }
+
+        return $result === [] ? null : $result;
+    }
+
+    if (is_bool($value) || is_int($value) || is_float($value))
+    {
+        return $value;
+    }
+
+    $value = trim((string)$value);
+
+    return $value === '' ? null : $value;
 }
 
 function loadTemplateFromHl(string $templateId, int $userId, bool $allowAnyUser = false): ?array
