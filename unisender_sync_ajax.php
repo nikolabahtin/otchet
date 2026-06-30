@@ -1,7 +1,13 @@
 <?php
 /**
- * AJAX endpoint для синхронизации контактов отчёта с UniSender.
- * Вызывается из unisender_sync.php батчами.
+ * AJAX endpoint синхронизации с UniSender.
+ * Принимает массив emails (не offset/limit), работает ТОЛЬКО с UniSender — Bitrix не трогает.
+ *
+ * POST params:
+ *   action   = check | sync | import
+ *   emails[] = array of email strings
+ *   list_id  = UniSender list ID
+ *   sessid   = Bitrix session ID
  */
 
 declare(strict_types=1);
@@ -14,9 +20,6 @@ define('DisableEventsCheck', true);
 
 require $_SERVER['DOCUMENT_ROOT'] . '/bitrix/modules/main/include/prolog_before.php';
 require_once __DIR__ . '/../unisendermass/lib/UnifiedWizard.php';
-require_once __DIR__ . '/lib/Filter/FieldMapper.php';
-
-use Bitrix\Highloadblock as HL;
 
 header('Content-Type: application/json; charset=UTF-8');
 
@@ -24,7 +27,6 @@ try {
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
         throw new RuntimeException('Метод не поддерживается.');
     }
-
     global $USER;
     if (!is_object($USER) || !$USER->IsAuthorized()) {
         throw new RuntimeException('Требуется авторизация.');
@@ -32,104 +34,86 @@ try {
     if (!check_bitrix_sessid()) {
         throw new RuntimeException('Сессия истекла. Обновите страницу.');
     }
-    if (!\Bitrix\Main\Loader::includeModule('crm')) {
-        throw new RuntimeException('Модуль CRM не подключен.');
-    }
-    \Bitrix\Main\Loader::includeModule('highloadblock');
 
-    $reportId     = (string)($_POST['report_id'] ?? '');
-    $listId       = (string)($_POST['list_id'] ?? '');
-    $action       = (string)($_POST['action'] ?? '');
-    $offset       = (int)($_POST['offset'] ?? 0);
-    $limit        = max(1, min(50, (int)($_POST['limit'] ?? 10)));
+    $action = (string)($_POST['action'] ?? '');
+    $listId = (string)($_POST['list_id'] ?? '');
+    $emails = array_values(array_filter(array_map('strval', (array)($_POST['emails'] ?? [])), static function(string $e): bool {
+        return UsmTools::normalizeEmail($e) !== '';
+    }));
 
-    if ($reportId === '') throw new RuntimeException('Не указан report_id.');
-    if ($listId === '')   throw new RuntimeException('Не указан list_id.');
+    if ($action === '') throw new RuntimeException('Не указан action.');
+    if ($listId === '') throw new RuntimeException('Не указан list_id.');
+    if (empty($emails)) throw new RuntimeException('Список emails пуст.');
 
-    // Загружаем шаблон отчёта
-    $template = loadOtchetTemplateForAjax($reportId, (int)($USER->GetID()));
-    if (!$template) throw new RuntimeException('Шаблон отчёта не найден.');
+    $client = new UsmUniSenderClient(UsmConfig::apiKey());
 
-    $config = is_array($template['config'] ?? null) ? $template['config'] : [];
-    if (empty($config['filterValues'])) {
-        throw new RuntimeException('В шаблоне не сохранён фильтр.');
-    }
+    $items = [];
 
-    $client  = new UsmUniSenderClient(UsmConfig::apiKey());
-    $service = new UsmContactSyncService($client, new UsmReportProvider());
-
-    // Строим params в формате UsmContactSyncService
-    $params = buildOtchetSyncParams($config, $listId);
-
-    if ($action === 'ajax_check_unisender') {
-        $result = $service->diagnostics(0, $params, $offset, $limit);
-    } elseif ($action === 'ajax_sync_unisender') {
-        $result = $service->syncContactBatch(0, $params, $offset, $limit);
-    } elseif ($action === 'ajax_import_to_list') {
-        $result = $service->importMissingToListBatch(0, $params, $offset, $limit);
-    } else {
-        throw new RuntimeException('Неизвестное действие: ' . $action);
-    }
-
-    $result['logs'] = $client->logs;
-    echo \Bitrix\Main\Web\Json::encode(['ok' => true, 'result' => $result], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-
-} catch (\Throwable $e) {
-    echo \Bitrix\Main\Web\Json::encode(['ok' => false, 'error' => $e->getMessage()], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-}
-
-// ── helpers ───────────────────────────────────────────────────────────────────
-
-function loadOtchetTemplateForAjax(string $templateId, int $userId): ?array
-{
-    try {
-        $block = HL\HighloadBlockTable::getList([
-            'filter' => ['=NAME' => 'gnc_report_presets'],
-            'limit'  => 1,
-        ])->fetch();
-        if ($block) {
-            $dataClass = HL\HighloadBlockTable::compileEntity($block)->getDataClass();
-            $row = $dataClass::getList([
-                'filter' => ['=UF_TEMPLATE_ID' => $templateId],
-                'limit'  => 1,
-            ])->fetch();
-            if ($row) {
-                $config = is_string($row['UF_CONFIG'] ?? null) ? json_decode($row['UF_CONFIG'], true) : null;
-                return ['id' => $templateId, 'name' => (string)($row['UF_NAME'] ?? ''), 'config' => is_array($config) ? $config : []];
+    if ($action === 'check') {
+        // Проверить каждый email: есть ли в UniSender, есть ли в списке
+        foreach ($emails as $email) {
+            $email = UsmTools::normalizeEmail($email);
+            if ($email === '') continue;
+            try {
+                $resp   = $client->getContact($email);
+                $exists = isset($resp['result']) && is_array($resp['result']) && !empty($resp['result']);
+                $inList = false;
+                if ($exists) {
+                    $inList = (bool)$client->isContactInList($email, $listId);
+                }
+                $items[] = ['email' => $email, 'exists' => $exists, 'in_list' => $inList, 'status' => $exists ? 'Найден в UniSender' : 'Не найден в UniSender'];
+            } catch (\Throwable $e) {
+                $items[] = ['email' => $email, 'exists' => false, 'in_list' => false, 'error' => $e->getMessage()];
             }
         }
-    } catch (\Throwable $e) {}
 
-    $storageDir = __DIR__ . '/storage/templates';
-    foreach (glob($storageDir . '/u*_' . $templateId . '.json') ?: [] as $path) {
-        $raw = file_get_contents($path);
-        if ($raw === false) continue;
-        $data = json_decode($raw, true);
-        if (!is_array($data)) continue;
-        return ['id' => $templateId, 'name' => (string)($data['name'] ?? ''), 'config' => is_array($data['config'] ?? null) ? $data['config'] : []];
+    } elseif ($action === 'sync') {
+        // Подписать каждый email в список через subscribe
+        foreach ($emails as $email) {
+            $email = UsmTools::normalizeEmail($email);
+            if ($email === '') continue;
+            try {
+                $resp   = $client->subscribe($email, $listId, []);
+                $exists = true;
+                $items[] = ['email' => $email, 'exists' => $exists, 'in_list' => true, 'status' => 'Синхронизировано'];
+            } catch (\Throwable $e) {
+                $items[] = ['email' => $email, 'exists' => false, 'in_list' => false, 'error' => $e->getMessage()];
+            }
+        }
+
+    } elseif ($action === 'import') {
+        // Пакетный импорт через importContacts (один запрос на весь батч)
+        $fieldNames = ['email'];
+        $data = array_map(static function(string $e): array { return [$e]; }, $emails);
+        try {
+            $resp = $client->importContacts($fieldNames, $data);
+            // importContacts возвращает общую статистику, не per-email
+            // Помечаем все email как успешные
+            foreach ($emails as $email) {
+                $email = UsmTools::normalizeEmail($email);
+                if ($email === '') continue;
+                $items[] = ['email' => $email, 'exists' => true, 'in_list' => true, 'status' => 'Импортировано'];
+            }
+        } catch (\Throwable $e) {
+            foreach ($emails as $email) {
+                $email = UsmTools::normalizeEmail($email);
+                if ($email === '') continue;
+                $items[] = ['email' => $email, 'exists' => false, 'in_list' => false, 'error' => $e->getMessage()];
+            }
+        }
+
+    } else {
+        throw new RuntimeException('Неизвестный action: ' . $action);
     }
-    return null;
-}
 
-function buildOtchetSyncParams(array $config, string $listId): array
-{
-    $nodes    = is_array($config['nodes'] ?? null) ? $config['nodes'] : [];
-    $rootNode = null;
-    foreach ($nodes as $n) {
-        if (empty($n['parentId'])) { $rootNode = $n; break; }
-    }
-    $rootNode = $rootNode ?? ($nodes[0] ?? []);
+    echo \Bitrix\Main\Web\Json::encode([
+        'ok'     => true,
+        'result' => ['items' => $items],
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 
-    return [
-        'audience' => [
-            'reportId'      => '',         // не нужен — config передаётся напрямую
-            'name'          => '',
-            'rootEntity'    => (string)($rootNode['entityCode'] ?? 'CONTACT'),
-            'fields'        => [],
-            '_otchetConfig' => $config,    // UsmReportProvider::loadRecipients поддерживает этот ключ
-        ],
-        'template' => ['id' => '', 'variables' => []],
-        'mapping'  => [],
-        'list'     => ['id' => $listId],
-    ];
+} catch (\Throwable $e) {
+    echo \Bitrix\Main\Web\Json::encode([
+        'ok'    => false,
+        'error' => $e->getMessage(),
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 }

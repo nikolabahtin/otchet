@@ -1,7 +1,7 @@
 <?php
 /**
  * Страница синхронизации контактов отчёта с UniSender.
- * URL: /local/otchet/unisender_sync.php?id={templateId}
+ * Архитектура: Bitrix загружается один раз → JSON на фронт → AJAX только UniSender.
  */
 
 declare(strict_types=1);
@@ -42,8 +42,6 @@ function loadOtchetTemplateForSync(string $templateId): ?array
             }
         } catch (\Throwable $e) {}
     }
-
-    // Fallback: файл
     foreach (glob(__DIR__ . '/storage/templates/u*_' . $templateId . '.json') ?: [] as $path) {
         $raw = file_get_contents($path);
         if ($raw === false) continue;
@@ -84,7 +82,7 @@ if (!$template) {
 
 $config = is_array($template['config'] ?? null) ? $template['config'] : [];
 if (empty($config['filterValues'])) {
-    echo '<div class="ui-alert ui-alert-warning"><span class="ui-alert-message">В шаблоне не сохранён фильтр. Перейдите в отчёт, настройте фильтр и сохраните его.</span></div>';
+    echo '<div class="ui-alert ui-alert-warning"><span class="ui-alert-message">В шаблоне не сохранён фильтр. Перейдите в отчёт и сохраните фильтр.</span></div>';
     require $_SERVER['DOCUMENT_ROOT'] . '/bitrix/footer.php';
     return;
 }
@@ -104,9 +102,11 @@ try {
 // ── выбранный список ──────────────────────────────────────────────────────────
 $selectedListId = (string)($_GET['list_id'] ?? '');
 
-// ── получить контакты (только если выбран список) ─────────────────────────────
-$recipients = [];
-$loadError  = '';
+// ── Загрузка контактов из Bitrix (ОДИН РАЗ) ──────────────────────────────────
+// Развернуть multi-email, отфильтровать пустые — результат отдаём как JSON во фронт.
+$contactRows = [];   // [{email, contactId, name}]
+$loadError   = '';
+
 if ($selectedListId !== '') {
     try {
         $syncParams = [
@@ -122,93 +122,120 @@ if ($selectedListId !== '') {
         ];
         $reportProvider = new UsmReportProvider();
         $all = $reportProvider->loadRecipients($syncParams);
-        // Только контакты с email
-        $recipients = array_values(array_filter($all, static function (array $r): bool {
-            return trim((string)($r['email'] ?? '')) !== '';
-        }));
+
+        // Развернуть: один recipient уже может быть одним email (loadRecipients делает foreach $emails)
+        // Фильтруем пустые и дедуплицируем email
+        $seenEmails = [];
+        foreach ($all as $r) {
+            $email = UsmTools::normalizeEmail((string)($r['email'] ?? ''));
+            if ($email === '') continue;
+            if (isset($seenEmails[$email])) continue;
+            $seenEmails[$email] = true;
+
+            $name = trim((string)($r['values']['NAME'] ?? $r['values']['TITLE'] ?? ''));
+            $contactId = (int)($r['contact_id'] ?? $r['root_id'] ?? 0);
+
+            $contactRows[] = [
+                'email'     => $email,
+                'name'      => $name,
+                'contactId' => $contactId,
+            ];
+        }
     } catch (\Throwable $e) {
         $loadError = $e->getMessage();
     }
 }
 
-$totalContacts = count($recipients);
+$totalContacts = count($contactRows);
+$contactsJson  = json_encode($contactRows, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 
 ?>
 <style>
-/* Растягиваем рабочую область на всю ширину */
+/* Полная ширина рабочей области */
 .pagetitle-theme-bx-bigbitrix .pagetitle-inner,
-.content-area,
-.content-area-inner,
-.bx-content,
-.bx-content-inner { max-width: none !important; }
+.content-area, .content-area-inner, .bx-content, .bx-content-inner { max-width:none !important; }
 
-.usync-page { padding: 20px 24px 60px; box-sizing: border-box; }
-.usync-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:18px; flex-wrap:wrap; gap:12px; }
-.usync-title { font-size:22px; font-weight:700; margin:0; }
-.usync-subtitle { color:#66758c; font-size:13px; margin:4px 0 0; }
-.usync-card { background:#fff; border:1px solid #d9e1ec; border-radius:6px; padding:18px 20px; margin-bottom:14px; }
-.usync-card-title { font-weight:700; font-size:14px; margin:0 0 12px; color:#172033; }
-.usync-list-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:8px; }
-.usync-list-item { border:2px solid #d9e1ec; border-radius:5px; padding:9px 12px; cursor:pointer; background:#fff; transition:border-color .15s,background .15s; user-select:none; }
+.usync-page { padding:18px 24px 60px; box-sizing:border-box; }
+.usync-head { display:flex; align-items:flex-start; justify-content:space-between; margin-bottom:16px; flex-wrap:wrap; gap:10px; }
+.usync-title { font-size:20px; font-weight:700; margin:0 0 3px; }
+.usync-subtitle { color:#66758c; font-size:13px; }
+
+/* Карточки */
+.usync-card { background:#fff; border:1px solid #d9e1ec; border-radius:6px; padding:16px 20px; margin-bottom:12px; }
+.usync-card-title { font-weight:700; font-size:13px; color:#45556d; text-transform:uppercase; letter-spacing:.4px; margin:0 0 12px; }
+
+/* Списки UniSender */
+.usync-list-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); gap:7px; }
+.usync-list-item { border:2px solid #d9e1ec; border-radius:5px; padding:8px 11px; cursor:pointer; background:#fff; transition:border-color .12s,background .12s; user-select:none; }
 .usync-list-item:hover { border-color:#2357d6; background:#f5f8ff; }
 .usync-list-item.active { border-color:#2357d6; background:#edf3ff; }
-.usync-list-name { font-weight:700; font-size:13px; }
-.usync-list-meta { color:#66758c; font-size:11px; margin-top:2px; }
+.usync-list-name { font-weight:700; font-size:12px; }
+.usync-list-meta { color:#99a8bc; font-size:11px; margin-top:1px; }
 
-/* Статистика — 6 карточек */
-.usync-stats { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:8px; margin:12px 0 16px; }
-.usync-stat { border:1px solid #edf1f6; background:#f8fafc; border-radius:5px; padding:10px 12px; }
-.usync-stat-label { color:#66758c; font-size:10px; text-transform:uppercase; letter-spacing:.4px; }
-.usync-stat-value { font-weight:700; font-size:22px; margin-top:4px; }
+/* Статистика */
+.usync-stats { display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:7px; margin:0 0 14px; }
+.usync-stat { border:1px solid #e4eaf2; background:#f8fafc; border-radius:5px; padding:9px 11px; }
+.usync-stat-label { color:#66758c; font-size:10px; text-transform:uppercase; letter-spacing:.3px; line-height:1.3; }
+.usync-stat-value { font-weight:700; font-size:20px; margin-top:3px; color:#172033; }
+.usync-stat-value.green { color:#065f46; }
+.usync-stat-value.red   { color:#b91c1c; }
+.usync-stat-value.blue  { color:#1d4ed8; }
 
-/* Прогресс-бар */
-.usync-progress-wrap { margin:10px 0; display:none; }
-.usync-progress-bar-track { background:#e4eaf2; border-radius:4px; height:6px; overflow:hidden; margin-bottom:6px; }
-.usync-progress-bar-fill { height:100%; background:#2357d6; border-radius:4px; transition:width .3s; width:0%; }
-.usync-progress-text { font-size:13px; color:#163b73; }
+/* Прогресс */
+.usync-progress-wrap { margin:8px 0 12px; }
+.usync-progress-track { background:#e4eaf2; border-radius:3px; height:5px; overflow:hidden; }
+.usync-progress-fill { height:100%; background:#2357d6; border-radius:3px; transition:width .25s; width:0%; }
+.usync-progress-text { font-size:12px; color:#526070; margin-top:4px; }
 
 /* Кнопки */
-.usync-actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:4px 0 12px; }
-.usync-btn { display:inline-flex; align-items:center; gap:7px; min-height:36px; padding:0 16px; border:0; border-radius:5px; background:#2357d6; color:#fff; font-weight:700; cursor:pointer; font-size:13px; text-decoration:none; transition:background .15s,opacity .15s; white-space:nowrap; }
+.usync-toolbar { display:flex; gap:7px; flex-wrap:wrap; align-items:center; margin-bottom:10px; }
+.usync-btn { display:inline-flex; align-items:center; gap:6px; min-height:34px; padding:0 14px; border:0; border-radius:5px; background:#2357d6; color:#fff; font-weight:700; cursor:pointer; font-size:13px; text-decoration:none; transition:background .12s; white-space:nowrap; }
 .usync-btn:hover { background:#1a46b0; color:#fff; text-decoration:none; }
-.usync-btn.secondary { background:#526070; }
-.usync-btn.secondary:hover { background:#3e4f5e; }
-.usync-btn.pause { background:#d97706; }
-.usync-btn.pause:hover { background:#b45309; }
-.usync-btn.stop { background:#dc2626; }
-.usync-btn.stop:hover { background:#b91c1c; }
-.usync-btn:disabled, .usync-btn.running { opacity:.6; pointer-events:none; }
-.usync-btn.running { opacity:1; pointer-events:none; }
-.usync-spinner { width:13px; height:13px; border:2px solid rgba(255,255,255,.35); border-top-color:#fff; border-radius:50%; animation:spin .75s linear infinite; flex-shrink:0; }
+.usync-btn.secondary { background:#526070; } .usync-btn.secondary:hover { background:#3e4e5d; }
+.usync-btn.warning  { background:#d97706; } .usync-btn.warning:hover  { background:#b45309; }
+.usync-btn.danger   { background:#dc2626; } .usync-btn.danger:hover   { background:#b91c1c; }
+.usync-btn[disabled], .usync-btn.busy { opacity:.55; pointer-events:none; }
+.usync-btn.busy { opacity:1; }
+.usync-spinner { width:12px; height:12px; border:2px solid rgba(255,255,255,.3); border-top-color:#fff; border-radius:50%; animation:spin .7s linear infinite; }
 @keyframes spin { to { transform:rotate(360deg); } }
-
-.usync-alert { border-radius:5px; padding:10px 14px; margin:8px 0; border:1px solid #ffccc7; background:#fff1f0; color:#7a1b12; font-size:13px; }
-.usync-note { border-radius:5px; padding:10px 14px; margin:8px 0; border:1px solid #b9d4ff; background:#eef5ff; color:#163b73; font-size:13px; }
+.usync-sep { width:1px; height:24px; background:#d9e1ec; flex-shrink:0; }
 
 /* Таблица */
-.usync-table-wrap { margin-top:8px; max-height:580px; overflow:auto; border:1px solid #e4eaf2; border-radius:5px; }
-.usync-table { width:100%; border-collapse:collapse; font-size:13px; }
-.usync-table th, .usync-table td { border-bottom:1px solid #edf1f6; padding:7px 10px; text-align:left; vertical-align:middle; }
+.usync-table-wrap { border:1px solid #e4eaf2; border-radius:5px; overflow:auto; max-height:600px; }
+.usync-table { width:100%; border-collapse:collapse; font-size:12px; }
+.usync-table th, .usync-table td { border-bottom:1px solid #edf1f6; padding:6px 9px; text-align:left; vertical-align:middle; }
 .usync-table tbody tr:last-child td { border-bottom:none; }
-.usync-table th { position:sticky; top:0; z-index:2; background:#f4f6f9; color:#45556d; font-size:11px; text-transform:uppercase; font-weight:700; }
-.usync-badge { display:inline-flex; align-items:center; min-height:20px; padding:0 7px; border-radius:999px; background:#edf3ff; color:#1b4db3; font-size:11px; font-weight:700; }
-.usync-badge.warn { background:#fff4df; color:#8a4b00; }
-.usync-badge.no { background:#fff1f0; color:#b42318; }
-.usync-badge.ok { background:#d1fae5; color:#065f46; }
-.usync-row-work td { background:#fffce6 !important; }
+.usync-table th { position:sticky; top:0; z-index:2; background:#f4f6f9; color:#45556d; font-size:10px; text-transform:uppercase; font-weight:700; white-space:nowrap; }
+.usync-badge { display:inline-flex; align-items:center; min-height:18px; padding:0 6px; border-radius:99px; font-size:11px; font-weight:700; }
+.usync-badge.ok   { background:#d1fae5; color:#065f46; }
+.usync-badge.no   { background:#fee2e2; color:#b91c1c; }
+.usync-badge.warn { background:#fef3c7; color:#92400e; }
+.usync-row-work td { background:#fffce8 !important; }
 .usync-row-done td { background:#f0fdf4 !important; }
-.usync-row-err td { background:#fff5f5 !important; }
-.usync-empty { color:#66758c; font-style:italic; padding:24px 0; text-align:center; }
+.usync-row-err  td { background:#fff5f5 !important; }
+.usync-empty { color:#99a8bc; font-style:italic; text-align:center; padding:30px 0; }
+.usync-num { color:#c4cdd8; font-size:11px; }
 
-@media(max-width:900px) { .usync-stats { grid-template-columns:repeat(3,1fr); } }
-@media(max-width:600px) { .usync-stats { grid-template-columns:repeat(2,1fr); } .usync-actions { flex-direction:column; } }
+/* Алерты */
+.usync-alert { border-radius:5px; padding:9px 13px; margin:8px 0; border:1px solid #fca5a5; background:#fff1f0; color:#7a1b12; font-size:13px; }
+.usync-note  { border-radius:5px; padding:9px 13px; margin:8px 0; border:1px solid #93c5fd; background:#eff6ff; color:#1e3a8a; font-size:13px; }
+
+@media(max-width:1000px) { .usync-stats { grid-template-columns:repeat(4,1fr); } }
+@media(max-width:640px)  { .usync-stats { grid-template-columns:repeat(2,1fr); } }
 </style>
 
 <div class="usync-page">
+
+    <!-- Шапка -->
     <div class="usync-head">
         <div>
-            <h1 class="usync-title">Синхронизация с UniSender</h1>
-            <div class="usync-subtitle">Отчёт: <?= htmlspecialchars((string)($template['name'] ?? $templateId)) ?> &nbsp;·&nbsp; Контактов с email: <strong><?= $totalContacts ?></strong></div>
+            <div class="usync-title">Синхронизация с UniSender</div>
+            <div class="usync-subtitle">
+                Отчёт: <strong><?= htmlspecialchars((string)($template['name'] ?? $templateId)) ?></strong>
+                <?php if ($selectedListId !== '' && $totalContacts > 0): ?>
+                &nbsp;·&nbsp; Строк для синхронизации: <strong><?= $totalContacts ?></strong>
+                <?php endif; ?>
+            </div>
         </div>
         <a class="usync-btn secondary" href="/local/otchet/report.php?id=<?= urlencode($templateId) ?>">← Назад к отчёту</a>
     </div>
@@ -217,14 +244,14 @@ $totalContacts = count($recipients);
     <div class="usync-alert">Ошибка подключения к UniSender: <?= htmlspecialchars($initError) ?></div>
     <?php endif; ?>
     <?php if ($loadError !== ''): ?>
-    <div class="usync-alert">Ошибка загрузки контактов: <?= htmlspecialchars($loadError) ?></div>
+    <div class="usync-alert">Ошибка загрузки контактов из Bitrix: <?= htmlspecialchars($loadError) ?></div>
     <?php endif; ?>
 
     <!-- 1. Выбор списка UniSender -->
     <div class="usync-card">
-        <div class="usync-card-title">1. Выберите список UniSender</div>
+        <div class="usync-card-title">Список UniSender</div>
         <?php if (empty($uniLists)): ?>
-        <div class="usync-alert">Списки UniSender не найдены. Проверьте API-ключ.</div>
+        <div class="usync-alert">Списки не найдены. Проверьте API-ключ.</div>
         <?php else: ?>
         <div class="usync-list-grid">
             <?php foreach ($uniLists as $lst): ?>
@@ -239,105 +266,313 @@ $totalContacts = count($recipients);
     </div>
 
     <!-- 2. Синхронизация -->
-    <div class="usync-card" id="syncSection" <?= $selectedListId === '' ? 'style="display:none"' : '' ?>>
-        <div class="usync-card-title">2. Синхронизация контактов</div>
+    <?php if ($selectedListId !== ''): ?>
+    <div class="usync-card" id="syncSection">
 
-        <!-- Статистика (6 плиток) -->
+        <!-- Статистика -->
         <div class="usync-stats">
-            <div class="usync-stat">
-                <div class="usync-stat-label">Контактов с email</div>
-                <div class="usync-stat-value"><?= $totalContacts ?></div>
-            </div>
-            <div class="usync-stat">
-                <div class="usync-stat-label">Обработано</div>
-                <div class="usync-stat-value" id="statDone">0</div>
-            </div>
-            <div class="usync-stat">
-                <div class="usync-stat-label">Найдено в UniSender</div>
-                <div class="usync-stat-value" id="statFound">—</div>
-            </div>
-            <div class="usync-stat">
-                <div class="usync-stat-label">В выбранном списке</div>
-                <div class="usync-stat-value" id="statInList">—</div>
-            </div>
-            <div class="usync-stat">
-                <div class="usync-stat-label">Не в списке</div>
-                <div class="usync-stat-value" id="statNotInList">—</div>
-            </div>
-            <div class="usync-stat">
-                <div class="usync-stat-label">Ошибок</div>
-                <div class="usync-stat-value" id="statErrors">0</div>
-            </div>
+            <div class="usync-stat"><div class="usync-stat-label">Всего строк</div><div class="usync-stat-value blue" id="statTotal"><?= $totalContacts ?></div></div>
+            <div class="usync-stat"><div class="usync-stat-label">Обработано</div><div class="usync-stat-value" id="statDone">0</div></div>
+            <div class="usync-stat"><div class="usync-stat-label">Найдено в UniSender</div><div class="usync-stat-value green" id="statFound">—</div></div>
+            <div class="usync-stat"><div class="usync-stat-label">Не найдено</div><div class="usync-stat-value red" id="statNotFound">—</div></div>
+            <div class="usync-stat"><div class="usync-stat-label">В выбранном списке</div><div class="usync-stat-value green" id="statInList">—</div></div>
+            <div class="usync-stat"><div class="usync-stat-label">Не в списке</div><div class="usync-stat-value red" id="statNotInList">—</div></div>
+            <div class="usync-stat"><div class="usync-stat-label">Ошибок</div><div class="usync-stat-value red" id="statErrors">0</div></div>
         </div>
 
-        <!-- Прогресс-бар -->
-        <div class="usync-progress-wrap" id="progressWrap">
-            <div class="usync-progress-bar-track"><div class="usync-progress-bar-fill" id="progressBar"></div></div>
+        <!-- Прогресс -->
+        <div class="usync-progress-wrap" id="progressWrap" style="display:none">
+            <div class="usync-progress-track"><div class="usync-progress-fill" id="progressFill"></div></div>
             <div class="usync-progress-text" id="progressText"></div>
         </div>
 
-        <!-- Кнопки действий -->
-        <div class="usync-actions" id="actionButtons">
-            <button class="usync-btn" type="button" id="btnCheck" data-action="ajax_check_unisender" data-label="Проверка UniSender">
-                Проверить контакты в UniSender
-            </button>
-            <button class="usync-btn" type="button" id="btnSync" data-action="ajax_sync_unisender" data-label="Синхронизация UniSender">
-                Синхронизировать контакты с UniSender
-            </button>
-            <button class="usync-btn" type="button" id="btnImport" data-action="ajax_import_to_list" data-label="Загрузка в список">
-                Загрузить контакты в список
-            </button>
-        </div>
-
-        <!-- Кнопки управления процессом (появляются во время работы) -->
-        <div class="usync-actions" id="controlButtons" style="display:none">
-            <button class="usync-btn pause" type="button" id="btnPause">⏸ Пауза</button>
-            <button class="usync-btn stop"  type="button" id="btnStop">⏹ Остановить</button>
+        <!-- Панель кнопок -->
+        <div class="usync-toolbar">
+            <!-- Действия -->
+            <button class="usync-btn" id="btnCheck"  data-action="check"  title="Проверить наличие каждого email в UniSender и в выбранном списке">Проверить контакты</button>
+            <button class="usync-btn" id="btnSync"   data-action="sync"   title="Подписать отсутствующие email в UniSender (subscribe)">Синхронизировать</button>
+            <button class="usync-btn" id="btnImport" data-action="import" title="Загрузить все email в выбранный список пакетно (importContacts)">Загрузить в список</button>
+            <div class="usync-sep"></div>
+            <!-- Управление процессом (скрыты пока нет активного процесса) -->
+            <button class="usync-btn warning" id="btnPause" style="display:none">⏸ Пауза</button>
+            <button class="usync-btn danger"  id="btnStop"  style="display:none">⏹ Стоп</button>
         </div>
 
         <div id="resultNote" style="display:none"></div>
 
-        <!-- Таблица контактов -->
+        <!-- Таблица (рендерится JS'ом) -->
         <div class="usync-table-wrap">
-            <table class="usync-table">
+            <table class="usync-table" id="syncTable">
                 <thead>
                     <tr>
-                        <th>#</th>
+                        <th style="width:36px">#</th>
                         <th>Email</th>
-                        <th>В UniSender</th>
-                        <th>В выбранном списке</th>
+                        <th style="width:100px">В UniSender</th>
+                        <th style="width:140px">В выбранном списке</th>
                         <th>Статус</th>
                     </tr>
                 </thead>
-                <tbody id="syncTableBody">
-                    <?php if (empty($recipients) && $selectedListId !== ''): ?>
-                    <tr><td colspan="5" class="usync-empty">Контактов с email не найдено по фильтру отчёта</td></tr>
-                    <?php else: ?>
-                    <?php foreach ($recipients as $i => $r): ?>
-                    <?php $em = htmlspecialchars((string)($r['email'] ?? '')); ?>
-                    <tr data-email="<?= $em ?>">
-                        <td style="color:#99a8bc;font-size:11px"><?= $i + 1 ?></td>
-                        <td><?= $em ?></td>
-                        <td data-col="US"><span class="usync-badge warn">не проверено</span></td>
-                        <td data-col="LIST"><span class="usync-badge warn">не проверено</span></td>
-                        <td data-col="STATUS" style="color:#66758c;font-size:12px"></td>
-                    </tr>
-                    <?php endforeach; ?>
-                    <?php endif; ?>
-                </tbody>
+                <tbody id="syncTableBody"></tbody>
             </table>
         </div>
     </div>
+    <?php endif; ?>
 </div>
 
 <script>
 (function(){
-    var templateId    = <?= json_encode($templateId) ?>;
-    var selectedListId = <?= json_encode($selectedListId) ?>;
-    var sessid        = <?= json_encode(bitrix_sessid()) ?>;
-    var totalRows     = <?= $totalContacts ?>;
+    'use strict';
 
-    // ── Выбор списка — перезагружаем страницу ────────────────────────────────
+    var templateId     = <?= json_encode($templateId) ?>;
+    var selectedListId = <?= json_encode($selectedListId) ?>;
+    var sessid         = <?= json_encode(bitrix_sessid()) ?>;
+
+    // ── Данные контактов — загружены из Bitrix ОДИН РАЗ ──────────────────────
+    // contacts[i] = {email, name, contactId}
+    var contacts = <?= $contactsJson ?? '[]' ?>;
+    var total    = contacts.length;
+
+    // ── Состояние строк (индекс по email) ────────────────────────────────────
+    // rowState[email] = {exists: null|bool, inList: null|bool, status: '', error: ''}
+    var rowState = {};
+    contacts.forEach(function(c){ rowState[c.email] = {exists:null, inList:null, status:'', error:''}; });
+
+    // ── Состояние процесса ────────────────────────────────────────────────────
+    var proc = { running:false, paused:false, stopped:false, action:'', offset:0, batchSize:20,
+                 done:0, errors:0, found:0, inList:0 };
+
+    // ── DOM ───────────────────────────────────────────────────────────────────
+    var tbody        = document.getElementById('syncTableBody');
+    var progressWrap = document.getElementById('progressWrap');
+    var progressFill = document.getElementById('progressFill');
+    var progressText = document.getElementById('progressText');
+    var resultNote   = document.getElementById('resultNote');
+    var btnPause     = document.getElementById('btnPause');
+    var btnStop      = document.getElementById('btnStop');
+
+    function $s(id){ return document.getElementById(id); }
+
+    // ── Рендер таблицы из contacts[] ─────────────────────────────────────────
+    function renderTable(){
+        var rows = contacts.map(function(c, i){
+            var s = rowState[c.email];
+            var usBadge   = s.exists  === true ? badge('да','ok') : s.exists  === false ? badge('нет','no') : badge('—','warn');
+            var listBadge = s.inList  === true ? badge('да','ok') : s.inList  === false ? badge('нет','no') : badge('—','warn');
+            var rowCls = s.error ? 'usync-row-err' : (s.status && s.exists !== null ? 'usync-row-done' : '');
+            return '<tr class="' + rowCls + '" data-idx="' + i + '">' +
+                '<td class="usync-num">' + (i+1) + '</td>' +
+                '<td>' + esc(c.email) + (c.name ? ' <span style="color:#99a8bc;font-size:11px">· ' + esc(c.name) + '</span>' : '') + '</td>' +
+                '<td>' + usBadge + '</td>' +
+                '<td>' + listBadge + '</td>' +
+                '<td style="font-size:11px;color:' + (s.error ? '#b91c1c' : '#526070') + '">' + esc(s.error || s.status) + '</td>' +
+            '</tr>';
+        });
+        tbody.innerHTML = rows.length ? rows.join('') : '<tr><td colspan="5" class="usync-empty">Нет контактов с email по фильтру отчёта</td></tr>';
+    }
+
+    function badge(t, cls){ return '<span class="usync-badge '+cls+'">'+esc(t)+'</span>'; }
+    function esc(v){ return String(v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+    // ── Обновить одну строку по индексу ──────────────────────────────────────
+    function updateRow(idx){
+        var row = tbody.querySelector('[data-idx="'+idx+'"]');
+        if (!row) return;
+        var c = contacts[idx];
+        var s = rowState[c.email];
+        row.className = s.error ? 'usync-row-err' : (s.exists !== null ? 'usync-row-done' : '');
+        row.cells[2].innerHTML = s.exists  === true ? badge('да','ok') : s.exists  === false ? badge('нет','no') : badge('—','warn');
+        row.cells[3].innerHTML = s.inList  === true ? badge('да','ok') : s.inList  === false ? badge('нет','no') : badge('—','warn');
+        row.cells[4].style.color = s.error ? '#b91c1c' : '#526070';
+        row.cells[4].textContent = s.error || s.status || '';
+    }
+
+    function markWorking(startIdx, count){
+        for (var i = startIdx; i < Math.min(startIdx+count, total); i++){
+            var row = tbody.querySelector('[data-idx="'+i+'"]');
+            if (row){ row.className = 'usync-row-work'; row.cells[4].textContent = 'В работе...'; }
+        }
+    }
+
+    // ── Статистика ────────────────────────────────────────────────────────────
+    function updateStats(){
+        $s('statDone').textContent     = proc.done;
+        $s('statErrors').textContent   = proc.errors;
+        $s('statFound').textContent    = proc.found >= 0    ? proc.found    : '—';
+        $s('statNotFound').textContent = proc.found >= 0    ? (proc.done - proc.found) : '—';
+        $s('statInList').textContent   = proc.inList >= 0   ? proc.inList   : '—';
+        $s('statNotInList').textContent= proc.inList >= 0   ? (proc.done - proc.inList) : '—';
+    }
+
+    function updateProgress(){
+        var pct = total > 0 ? Math.round(proc.offset / total * 100) : 0;
+        progressFill.style.width = pct + '%';
+        var label = proc.paused ? ' — ПАУЗА' : (proc.stopped ? ' — ОСТАНОВЛЕНО' : '');
+        progressText.textContent = proc.offset + ' / ' + total + ' (' + pct + '%)' + label;
+    }
+
+    // ── AJAX: отправляем массив email серверу ────────────────────────────────
+    // action: 'check' | 'sync' | 'import'
+    // emails: ['a@b.com', ...]
+    function ajaxEmails(action, emailBatch){
+        var fd = new FormData();
+        fd.append('sessid', sessid);
+        fd.append('action', action);
+        fd.append('list_id', selectedListId);
+        fd.append('report_id', templateId);
+        emailBatch.forEach(function(e){ fd.append('emails[]', e); });
+        return fetch('/local/otchet/unisender_sync_ajax.php', {
+            method:'POST', body:fd, credentials:'same-origin'
+        }).then(function(r){ return r.json(); }).then(function(j){
+            if (!j.ok) throw new Error(j.error || 'Ошибка сервера');
+            return j.result || {};
+        });
+    }
+
+    // ── Основной цикл обработки ───────────────────────────────────────────────
+    function runNext(){
+        if (!proc.running || proc.paused || proc.stopped) return;
+        if (proc.offset >= total){ finishProc('завершено'); return; }
+
+        var batchStart = proc.offset;
+        var batchEnd   = Math.min(batchStart + proc.batchSize, total);
+        var batch      = contacts.slice(batchStart, batchEnd);
+        var emails     = batch.map(function(c){ return c.email; });
+
+        markWorking(batchStart, batch.length);
+        updateProgress();
+
+        ajaxEmails(proc.action, emails).then(function(result){
+            if (proc.stopped) return;
+
+            var items = result.items || [];
+            items.forEach(function(item, ii){
+                var idx = batchStart + ii;
+                var c   = contacts[idx];
+                if (!c) return;
+                var s = rowState[c.email];
+                s.exists = item.exists  !== undefined ? !!item.exists  : s.exists;
+                s.inList = item.in_list !== undefined ? !!item.in_list : s.inList;
+                s.status = item.status || '';
+                s.error  = item.error  || '';
+                if (s.exists)  proc.found++;
+                if (s.inList)  proc.inList++;
+                if (s.error)   proc.errors++;
+                proc.done++;
+                updateRow(idx);
+            });
+
+            proc.offset = batchEnd;
+            updateStats();
+            updateProgress();
+
+            // Скролл к последней обработанной строке
+            var lastRow = tbody.querySelector('[data-idx="'+(batchEnd-1)+'"]');
+            if (lastRow) lastRow.scrollIntoView({block:'nearest', behavior:'smooth'});
+
+            runNext();
+
+        }).catch(function(err){
+            if (proc.stopped) return;
+            // Помечаем весь батч как ошибку
+            for (var ii = batchStart; ii < batchEnd; ii++){
+                var c = contacts[ii];
+                if (!c) continue;
+                rowState[c.email].error = err.message;
+                rowState[c.email].status = '';
+                proc.errors++;
+                proc.done++;
+                updateRow(ii);
+            }
+            proc.offset = batchEnd;
+            updateStats();
+            runNext();
+        });
+    }
+
+    // ── Старт/финиш процесса ─────────────────────────────────────────────────
+    function startProc(action){
+        if (proc.running) return;
+        proc = { running:true, paused:false, stopped:false, action:action,
+                 offset:0, batchSize:20, done:0, errors:0, found:0, inList:0 };
+
+        // Сбросить состояние строк
+        contacts.forEach(function(c){ rowState[c.email] = {exists:null,inList:null,status:'',error:''}; });
+        renderTable();
+
+        resultNote.style.display = 'none';
+        progressWrap.style.display = '';
+        btnPause.style.display = '';
+        btnStop.style.display  = '';
+        btnPause.textContent = '⏸ Пауза';
+
+        // Заблокировать кнопки действий
+        ['btnCheck','btnSync','btnImport'].forEach(function(id){
+            var b = $s(id);
+            if (!b) return;
+            if (b.getAttribute('data-action') === action){
+                b.classList.add('busy');
+                b.innerHTML = '<span class="usync-spinner"></span> ' + b.textContent.trim() + '...';
+            } else {
+                b.disabled = true;
+            }
+        });
+
+        updateStats();
+        updateProgress();
+        runNext();
+    }
+
+    function finishProc(reason){
+        proc.running = false;
+        btnPause.style.display = 'none';
+        btnStop.style.display  = 'none';
+
+        ['btnCheck','btnSync','btnImport'].forEach(function(id){
+            var b = $s(id);
+            if (!b) return;
+            b.classList.remove('busy');
+            b.disabled = false;
+            // Восстановить текст
+            var labels = {btnCheck:'Проверить контакты', btnSync:'Синхронизировать', btnImport:'Загрузить в список'};
+            b.innerHTML = labels[id] || b.textContent;
+        });
+
+        updateProgress();
+        resultNote.style.display = '';
+        resultNote.className = proc.errors > 0 ? 'usync-alert' : 'usync-note';
+        resultNote.textContent = 'Процесс ' + reason + '. ' +
+            'Обработано: ' + proc.done + ', ' +
+            'найдено в UniSender: ' + proc.found + ', ' +
+            'в списке: ' + proc.inList + ', ' +
+            'ошибок: ' + proc.errors + '.';
+    }
+
+    // ── Кнопки управления ─────────────────────────────────────────────────────
+    $s('btnCheck')  && $s('btnCheck').addEventListener('click',  function(){ startProc('check'); });
+    $s('btnSync')   && $s('btnSync').addEventListener('click',   function(){ startProc('sync'); });
+    $s('btnImport') && $s('btnImport').addEventListener('click', function(){ startProc('import'); });
+
+    btnPause && btnPause.addEventListener('click', function(){
+        if (!proc.running) return;
+        if (!proc.paused){
+            proc.paused = true;
+            btnPause.textContent = '▶ Продолжить';
+            updateProgress();
+        } else {
+            proc.paused = false;
+            btnPause.textContent = '⏸ Пауза';
+            runNext();
+        }
+    });
+
+    btnStop && btnStop.addEventListener('click', function(){
+        proc.stopped = true;
+        proc.paused  = false;
+        proc.running = false;
+        finishProc('остановлено пользователем');
+    });
+
+    // ── Выбор списка — перезагрузка страницы ─────────────────────────────────
     document.querySelectorAll('.usync-list-item').forEach(function(el){
         el.addEventListener('click', function(){
             var url = new URL(window.location.href);
@@ -346,221 +581,9 @@ $totalContacts = count($recipients);
         });
     });
 
-    // ── Состояние процесса ────────────────────────────────────────────────────
-    var state = {
-        running: false,
-        paused: false,
-        stopped: false,
-        action: '',
-        label: '',
-        offset: 0,
-        limit: 10,
-        done: 0,
-        errors: 0,
-        foundCount: 0,
-        inListCount: 0
-    };
+    // ── Начальный рендер таблицы ──────────────────────────────────────────────
+    if (total > 0) renderTable();
 
-    // ── DOM refs ──────────────────────────────────────────────────────────────
-    var progressWrap  = document.getElementById('progressWrap');
-    var progressBar   = document.getElementById('progressBar');
-    var progressText  = document.getElementById('progressText');
-    var actionButtons = document.getElementById('actionButtons');
-    var controlButtons = document.getElementById('controlButtons');
-    var resultNote    = document.getElementById('resultNote');
-    var btnPause      = document.getElementById('btnPause');
-    var btnStop       = document.getElementById('btnStop');
-
-    function stat(id){ return document.getElementById(id); }
-
-    function badge(text, cls){
-        return '<span class="usync-badge' + (cls ? ' '+cls : '') + '">' +
-            String(text).replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</span>';
-    }
-
-    function rowByEmail(email){
-        return document.querySelector('#syncTableBody [data-email="' +
-            String(email).replace(/["\\]/g,'\\$&') + '"]');
-    }
-
-    // ── Обновить статистику в реальном времени ────────────────────────────────
-    function updateStats(){
-        stat('statDone').textContent      = String(state.done);
-        stat('statErrors').textContent    = String(state.errors);
-        stat('statFound').textContent     = String(state.foundCount);
-        stat('statInList').textContent    = String(state.inListCount);
-        stat('statNotInList').textContent = String(state.done - state.inListCount);
-    }
-
-    function updateProgress(){
-        var pct = totalRows > 0 ? Math.round(state.offset / totalRows * 100) : 0;
-        progressBar.style.width  = pct + '%';
-        progressText.textContent = state.label + ': ' + Math.min(state.offset, totalRows) +
-            ' из ' + totalRows + ' (' + pct + '%)' +
-            (state.paused ? ' — ПАУЗА' : '');
-    }
-
-    // ── Применить результат по одному контакту ────────────────────────────────
-    function applyItem(item){
-        var row = rowByEmail(item.email);
-        if (!row) return;
-        row.classList.remove('usync-row-work');
-        row.classList.add(item.error ? 'usync-row-err' : 'usync-row-done');
-        var usCell     = row.querySelector('[data-col="US"]');
-        var listCell   = row.querySelector('[data-col="LIST"]');
-        var statusCell = row.querySelector('[data-col="STATUS"]');
-        if (usCell)     usCell.innerHTML   = item.exists          ? badge('да','ok') : badge('нет','no');
-        if (listCell)   listCell.innerHTML = item.in_selected_list ? badge('да','ok') : badge('нет','no');
-        if (statusCell) statusCell.textContent = item.status || item.error || '';
-    }
-
-    // ── AJAX один батч ────────────────────────────────────────────────────────
-    function ajaxBatch(){
-        var fd = new FormData();
-        fd.append('sessid',    sessid);
-        fd.append('action',    state.action);
-        fd.append('offset',    String(state.offset));
-        fd.append('limit',     String(state.limit));
-        fd.append('report_id', templateId);
-        fd.append('list_id',   selectedListId);
-        return fetch('/local/otchet/unisender_sync_ajax.php', {
-            method: 'POST', body: fd, credentials: 'same-origin'
-        }).then(function(r){ return r.json(); }).then(function(json){
-            if (!json.ok) throw new Error(json.error || 'Ошибка сервера');
-            return json.result || {};
-        });
-    }
-
-    // ── Запустить/возобновить обработку ──────────────────────────────────────
-    function runNext(){
-        if (state.stopped || state.paused || !state.running) return;
-        if (state.offset >= totalRows){
-            finishProcess('завершено');
-            return;
-        }
-
-        // Подсветить текущий батч
-        var rows = document.querySelectorAll('#syncTableBody tr[data-email]');
-        Array.prototype.slice.call(rows, state.offset, state.offset + state.limit).forEach(function(r){
-            r.classList.add('usync-row-work');
-            var s = r.querySelector('[data-col="STATUS"]');
-            if (s) s.textContent = 'В работе...';
-        });
-        updateProgress();
-
-        ajaxBatch().then(function(result){
-            if (state.stopped) return;
-            (result.items || []).forEach(function(item){
-                applyItem(item);
-                if (item.exists)          state.foundCount++;
-                if (item.in_selected_list) state.inListCount++;
-                if (item.error)           state.errors++;
-                state.done++;
-            });
-            state.offset += state.limit;
-            updateStats();
-            updateProgress();
-            // Scroll последней обработанной строки в видимость
-            var tbody = document.getElementById('syncTableBody');
-            var lastRow = tbody && tbody.querySelectorAll('tr[data-email]')[state.offset - 1];
-            if (lastRow) lastRow.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-
-            runNext();
-        }).catch(function(e){
-            if (state.stopped) return;
-            // Помечаем батч как ошибку и продолжаем
-            Array.prototype.slice.call(rows, state.offset, state.offset + state.limit).forEach(function(r){
-                r.classList.remove('usync-row-work');
-                r.classList.add('usync-row-err');
-                var s = r.querySelector('[data-col="STATUS"]');
-                if (s) s.textContent = 'Ошибка: ' + e.message;
-                state.errors++;
-                state.done++;
-            });
-            state.offset += state.limit;
-            updateStats();
-            runNext();
-        });
-    }
-
-    function finishProcess(reason){
-        state.running = false;
-        actionButtons.style.display  = '';
-        controlButtons.style.display = 'none';
-        document.querySelectorAll('#actionButtons .usync-btn').forEach(function(b){
-            b.classList.remove('running');
-            b.innerHTML = b.getAttribute('data-orig-label');
-        });
-        updateProgress();
-        progressText.textContent += ' — ' + reason + '.';
-        resultNote.style.display = '';
-        resultNote.className = 'usync-note';
-        resultNote.textContent = state.label + ': ' + reason + '. Обработано ' +
-            state.done + ', найдено в UniSender ' + state.foundCount +
-            ', в списке ' + state.inListCount + ', ошибок ' + state.errors + '.';
-    }
-
-    // ── Старт процесса ────────────────────────────────────────────────────────
-    function startProcess(action, label, triggerBtn){
-        if (state.running) return;
-        state.running    = true;
-        state.paused     = false;
-        state.stopped    = false;
-        state.action     = action;
-        state.label      = label;
-        state.offset     = 0;
-        state.done       = 0;
-        state.errors     = 0;
-        state.foundCount = 0;
-        state.inListCount = 0;
-
-        resultNote.style.display = 'none';
-        progressWrap.style.display = '';
-        controlButtons.style.display = '';
-        actionButtons.style.display = '';
-
-        // Заблокировать все кнопки действий, на нажатой — спиннер
-        document.querySelectorAll('#actionButtons .usync-btn').forEach(function(b){
-            if (!b.getAttribute('data-orig-label')) b.setAttribute('data-orig-label', b.innerHTML);
-            if (b === triggerBtn) {
-                b.innerHTML = '<span class="usync-spinner"></span> ' + label + '...';
-            }
-            b.classList.add('running');
-        });
-
-        updateStats();
-        updateProgress();
-        runNext();
-    }
-
-    // ── Пауза / Продолжить ────────────────────────────────────────────────────
-    btnPause && btnPause.addEventListener('click', function(){
-        if (!state.running) return;
-        if (!state.paused){
-            state.paused = true;
-            btnPause.textContent = '▶ Продолжить';
-            progressText.textContent += ' — ПАУЗА';
-        } else {
-            state.paused = false;
-            btnPause.textContent = '⏸ Пауза';
-            runNext();
-        }
-    });
-
-    // ── Остановить ────────────────────────────────────────────────────────────
-    btnStop && btnStop.addEventListener('click', function(){
-        state.stopped = true;
-        state.paused  = false;
-        state.running = false;
-        finishProcess('остановлено пользователем');
-    });
-
-    // ── Навесить клики на кнопки действий ────────────────────────────────────
-    document.querySelectorAll('#actionButtons .usync-btn').forEach(function(btn){
-        btn.addEventListener('click', function(){
-            startProcess(btn.getAttribute('data-action'), btn.getAttribute('data-label'), btn);
-        });
-    });
 })();
 </script>
 
