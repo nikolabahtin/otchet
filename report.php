@@ -731,6 +731,12 @@ if ($isExportExcel)
             </form>
             <?php endif; ?>
             <a class="ui-btn ui-btn-primary" id="exportExcelLink" href="/local/otchet/report.php?id=<?=urlencode((string)$template['id'])?>&export=excel">Выгрузить в Excel</a>
+            <?php
+            $hasSavedFilter = !empty($config['filterValues']);
+            if ($hasSavedFilter):
+            ?>
+            <a class="ui-btn ui-btn-success" href="/local/otchet/unisender_sync.php?id=<?=urlencode((string)$template['id'])?>">Синхронизировать с UniSender</a>
+            <?php endif; ?>
         </div>
     </div>
 
