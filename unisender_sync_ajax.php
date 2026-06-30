@@ -87,7 +87,7 @@ try {
             $resp   = $client->request('importContacts', [
                 'overwrite_tags'  => 0,
                 'overwrite_lists' => 0,
-                'field_names'     => ['email', 'Lists'],
+                'field_names'     => ['email', 'email_list_ids'],
                 'data'            => array_map(static function(string $e) use ($listId): array {
                     return [$e, $listId];
                 }, $emails),
