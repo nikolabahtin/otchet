@@ -288,12 +288,9 @@ $contactsJson  = json_encode($contactRows, JSON_UNESCAPED_UNICODE | JSON_UNESCAP
 
         <!-- Панель кнопок -->
         <div class="usync-toolbar">
-            <!-- Действия -->
-            <button class="usync-btn" id="btnCheck"  data-action="check"  title="Проверить наличие каждого email в UniSender и в выбранном списке">Проверить контакты</button>
-            <button class="usync-btn" id="btnSync"   data-action="sync"   title="Подписать отсутствующие email в UniSender (subscribe)">Синхронизировать</button>
-            <button class="usync-btn" id="btnImport" data-action="import" title="Загрузить все email в выбранный список пакетно (importContacts)">Загрузить в список</button>
+            <button class="usync-btn" id="btnSync"   data-action="sync"        title="Добавить/обновить контакты в базе UniSender без привязки к списку (importContacts)">Синхронизировать с UniSender</button>
+            <button class="usync-btn" id="btnImport" data-action="add_to_list" title="Добавить все email в выбранный список UniSender (importContacts с list_id)">Добавить в список</button>
             <div class="usync-sep"></div>
-            <!-- Управление процессом (скрыты пока нет активного процесса) -->
             <button class="usync-btn warning" id="btnPause" style="display:none">⏸ Пауза</button>
             <button class="usync-btn danger"  id="btnStop"  style="display:none">⏹ Стоп</button>
         </div>
@@ -338,7 +335,7 @@ $contactsJson  = json_encode($contactRows, JSON_UNESCAPED_UNICODE | JSON_UNESCAP
     contacts.forEach(function(c){ rowState[c.email] = {exists:null, inList:null, status:'', error:''}; });
 
     // ── Состояние процесса ────────────────────────────────────────────────────
-    var proc = { running:false, paused:false, stopped:false, action:'', offset:0, batchSize:20,
+    var proc = { running:false, paused:false, stopped:false, action:'', offset:0, batchSize:500,
                  done:0, errors:0, found:0, inList:0 };
 
     // ── DOM ───────────────────────────────────────────────────────────────────
@@ -451,12 +448,12 @@ $contactsJson  = json_encode($contactRows, JSON_UNESCAPED_UNICODE | JSON_UNESCAP
                 if (!c) return;
                 var s = rowState[c.email];
                 s.exists = item.exists  !== undefined ? !!item.exists  : s.exists;
-                s.inList = item.in_list !== undefined ? !!item.in_list : s.inList;
+                s.inList = item.in_list !== null && item.in_list !== undefined ? !!item.in_list : s.inList;
                 s.status = item.status || '';
                 s.error  = item.error  || '';
-                if (s.exists)  proc.found++;
-                if (s.inList)  proc.inList++;
-                if (s.error)   proc.errors++;
+                if (s.exists)            proc.found++;
+                if (s.inList === true)   proc.inList++;
+                if (s.error)             proc.errors++;
                 proc.done++;
                 updateRow(idx);
             });
@@ -506,7 +503,7 @@ $contactsJson  = json_encode($contactRows, JSON_UNESCAPED_UNICODE | JSON_UNESCAP
         btnPause.textContent = '⏸ Пауза';
 
         // Заблокировать кнопки действий
-        ['btnCheck','btnSync','btnImport'].forEach(function(id){
+        ['btnSync','btnImport'].forEach(function(id){
             var b = $s(id);
             if (!b) return;
             if (b.getAttribute('data-action') === action){
@@ -527,13 +524,12 @@ $contactsJson  = json_encode($contactRows, JSON_UNESCAPED_UNICODE | JSON_UNESCAP
         btnPause.style.display = 'none';
         btnStop.style.display  = 'none';
 
-        ['btnCheck','btnSync','btnImport'].forEach(function(id){
+        ['btnSync','btnImport'].forEach(function(id){
             var b = $s(id);
             if (!b) return;
             b.classList.remove('busy');
             b.disabled = false;
-            // Восстановить текст
-            var labels = {btnCheck:'Проверить контакты', btnSync:'Синхронизировать', btnImport:'Загрузить в список'};
+            var labels = {btnSync:'Синхронизировать с UniSender', btnImport:'Добавить в список'};
             b.innerHTML = labels[id] || b.textContent;
         });
 
@@ -548,9 +544,8 @@ $contactsJson  = json_encode($contactRows, JSON_UNESCAPED_UNICODE | JSON_UNESCAP
     }
 
     // ── Кнопки управления ─────────────────────────────────────────────────────
-    $s('btnCheck')  && $s('btnCheck').addEventListener('click',  function(){ startProc('check'); });
     $s('btnSync')   && $s('btnSync').addEventListener('click',   function(){ startProc('sync'); });
-    $s('btnImport') && $s('btnImport').addEventListener('click', function(){ startProc('import'); });
+    $s('btnImport') && $s('btnImport').addEventListener('click', function(){ startProc('add_to_list'); });
 
     btnPause && btnPause.addEventListener('click', function(){
         if (!proc.running) return;

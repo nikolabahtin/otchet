@@ -49,55 +49,62 @@ try {
 
     $items = [];
 
-    if ($action === 'check') {
-        // Проверить каждый email: есть ли в UniSender, есть ли в списке
-        foreach ($emails as $email) {
-            $email = UsmTools::normalizeEmail($email);
-            if ($email === '') continue;
-            try {
-                $resp   = $client->getContact($email);
-                $exists = isset($resp['result']) && is_array($resp['result']) && !empty($resp['result']);
-                $inList = false;
-                if ($exists) {
-                    $inList = (bool)$client->isContactInList($email, $listId);
-                }
-                $items[] = ['email' => $email, 'exists' => $exists, 'in_list' => $inList, 'status' => $exists ? 'Найден в UniSender' : 'Не найден в UniSender'];
-            } catch (\Throwable $e) {
-                $items[] = ['email' => $email, 'exists' => false, 'in_list' => false, 'error' => $e->getMessage()];
-            }
-        }
+    // Нормализуем emails
+    $emails = array_values(array_unique(array_filter(array_map(
+        static function(string $e): string { return UsmTools::normalizeEmail($e); },
+        $emails
+    ))));
+    if (empty($emails)) throw new RuntimeException('Нет валидных email после нормализации.');
 
-    } elseif ($action === 'sync') {
-        // Подписать каждый email в список через subscribe
-        foreach ($emails as $email) {
-            $email = UsmTools::normalizeEmail($email);
-            if ($email === '') continue;
-            try {
-                $resp   = $client->subscribe($email, $listId, []);
-                $exists = true;
-                $items[] = ['email' => $email, 'exists' => $exists, 'in_list' => true, 'status' => 'Синхронизировано'];
-            } catch (\Throwable $e) {
-                $items[] = ['email' => $email, 'exists' => false, 'in_list' => false, 'error' => $e->getMessage()];
-            }
-        }
+    $fieldNames = ['email'];
+    $data       = array_map(static function(string $e): array { return [$e]; }, $emails);
 
-    } elseif ($action === 'import') {
-        // Пакетный импорт через importContacts (один запрос на весь батч)
-        $fieldNames = ['email'];
-        $data = array_map(static function(string $e): array { return [$e]; }, $emails);
+    if ($action === 'sync') {
+        // Добавить/обновить контакты в базе UniSender (без привязки к списку)
         try {
-            $resp = $client->importContacts($fieldNames, $data);
-            // importContacts возвращает общую статистику, не per-email
-            // Помечаем все email как успешные
+            $resp    = $client->importContacts($fieldNames, $data);
+            $result  = is_array($resp['result'] ?? null) ? $resp['result'] : [];
+            $status  = 'Синхронизировано';
+            if (!empty($result)) {
+                $status .= ' (вставлено: ' . (int)($result['inserted'] ?? 0) .
+                           ', обновлено: ' . (int)($result['updated'] ?? 0) .
+                           ', невалидных: ' . (int)($result['invalid'] ?? 0) . ')';
+            }
             foreach ($emails as $email) {
-                $email = UsmTools::normalizeEmail($email);
-                if ($email === '') continue;
-                $items[] = ['email' => $email, 'exists' => true, 'in_list' => true, 'status' => 'Импортировано'];
+                $items[] = ['email' => $email, 'exists' => true, 'in_list' => null, 'status' => $status];
             }
         } catch (\Throwable $e) {
             foreach ($emails as $email) {
-                $email = UsmTools::normalizeEmail($email);
-                if ($email === '') continue;
+                $items[] = ['email' => $email, 'exists' => false, 'in_list' => false, 'error' => $e->getMessage()];
+            }
+        }
+
+    } elseif ($action === 'add_to_list') {
+        // Добавить контакты в выбранный список UniSender
+        if ($listId === '') throw new RuntimeException('Не выбран список UniSender.');
+        try {
+            $resp   = $client->request('importContacts', [
+                'overwrite_tags'  => 0,
+                'overwrite_lists' => 0,
+                'field_names'     => $fieldNames,
+                'data'            => $data,
+                'list_ids'        => $listId,
+            ]);
+            if (isset($resp['error'])) {
+                throw new RuntimeException('UniSender importContacts: ' . $resp['error']);
+            }
+            $result  = is_array($resp['result'] ?? null) ? $resp['result'] : [];
+            $status  = 'Добавлено в список';
+            if (!empty($result)) {
+                $status .= ' (вставлено: ' . (int)($result['inserted'] ?? 0) .
+                           ', обновлено: ' . (int)($result['updated'] ?? 0) .
+                           ', невалидных: ' . (int)($result['invalid'] ?? 0) . ')';
+            }
+            foreach ($emails as $email) {
+                $items[] = ['email' => $email, 'exists' => true, 'in_list' => true, 'status' => $status];
+            }
+        } catch (\Throwable $e) {
+            foreach ($emails as $email) {
                 $items[] = ['email' => $email, 'exists' => false, 'in_list' => false, 'error' => $e->getMessage()];
             }
         }
