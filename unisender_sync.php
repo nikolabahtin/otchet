@@ -339,8 +339,8 @@ function post(data){
 // ── Рендер таблицы ────────────────────────────────────────────────────────
 function rowStatusText(s){
     if (s.syncMsg) return s.syncMsg;
-    if (s.exists === null) return 'Проверка...';
-    if (s.inList)  return 'В UniSender и в списке';
+    if (s.inList)  return 'В списке' + (s.exists === null ? ' (проверка базы...)' : '');
+    if (s.exists === null) return 'Не в списке, проверка базы...';
     if (s.exists)  return 'В UniSender, не в списке';
     return 'Отсутствует в UniSender';
 }
@@ -393,52 +393,61 @@ function updateSyncStats(){
     $s('statErrors').textContent = proc.errors >= 0 ? proc.errors : '—';
 }
 
-// ── Шаг 1: Запрос двух async-экспортов из UniSender ──────────────────────
+// ── Шаг 1: Запрос двух async-экспортов из UniSender (независимо друг от друга) ──
+// scope=list — обычно быстро (десятки секунд), от него зависит кнопка синхронизации.
+// scope=all  — может быть долгим если в UniSender большая база, не блокирует работу со списком.
 function startExportCheck(){
     if (!total){ setLoaderDone('Контактов для синхронизации нет.'); return; }
 
-    loaderText.textContent = 'Запрашиваем контакты UniSender (шаг 1/2)...';
-    var p1 = post({action:'export_start', scope:'all',  list_id:selectedListId});
-    var p2 = post({action:'export_start', scope:'list', list_id:selectedListId});
+    statsBlock.style.display = '';
+    tableWrap.style.display  = '';
+    renderTable();
 
-    Promise.all([p1, p2]).then(function(results){
-        loaderText.textContent = 'Ожидаем готовности данных UniSender...';
-        return pollBoth(results[0].task_uuid, results[1].task_uuid);
-    }).then(function(pair){
-        usEmailSet   = new Set(pair[0]);
-        listEmailSet = new Set(pair[1]);
+    loaderText.textContent = 'Проверяем выбранный список UniSender...';
 
-        contacts.forEach(function(c){
-            var s = rowState[c.email];
-            s.exists = usEmailSet.has(c.email);
-            s.inList = listEmailSet.has(c.email);
-        });
-
+    post({action:'export_start', scope:'list', list_id:selectedListId}).then(function(r){
+        return pollOne(r.task_uuid, 80, function(msg){ loaderText.textContent = msg; });
+    }).then(function(emails){
+        listEmailSet = new Set(emails);
+        contacts.forEach(function(c){ rowState[c.email].inList = listEmailSet.has(c.email); });
         setLoaderDone(null);
         updateCheckStats();
-        statsBlock.style.display = '';
-        tableWrap.style.display  = '';
         renderTable();
-
     }).catch(function(err){
-        checkLoader.innerHTML = '<span style="color:#b91c1c;font-size:13px">Ошибка получения данных UniSender: '+esc(err.message)+'</span>';
-        statsBlock.style.display = '';
-        tableWrap.style.display  = '';
+        checkLoader.innerHTML = '<span style="color:#b91c1c;font-size:13px">Ошибка проверки списка: '+esc(err.message)+'</span>';
+        contacts.forEach(function(c){ rowState[c.email].inList = false; });
+        updateCheckStats();
         renderTable();
+    });
+
+    // Полная проверка базы UniSender — отдельно, медленнее, не блокирует кнопку
+    var usLoaderNote = document.createElement('div');
+    usLoaderNote.className = 'usync-note';
+    usLoaderNote.textContent = 'Проверяем всю базу UniSender (может занять несколько минут)...';
+    statsBlock.parentNode.insertBefore(usLoaderNote, statsBlock);
+
+    post({action:'export_start', scope:'all', list_id:selectedListId}).then(function(r){
+        return pollOne(r.task_uuid, 200, function(msg){ usLoaderNote.textContent = msg; });
+    }).then(function(emails){
+        usEmailSet = new Set(emails);
+        contacts.forEach(function(c){ rowState[c.email].exists = usEmailSet.has(c.email); });
+        usLoaderNote.remove();
+        updateCheckStats();
+        renderTable();
+    }).catch(function(err){
+        usLoaderNote.className = 'usync-alert';
+        usLoaderNote.textContent = 'Не удалось проверить всю базу UniSender: '+err.message+'. Колонка "В UniSender" может быть неточной для контактов вне списка.';
     });
 }
 
-function pollBoth(uuid1, uuid2){
+function pollOne(uuid, maxAttempts, onProgress){
     return new Promise(function(resolve, reject){
-        var e1=null, e2=null, attempts=0;
+        var attempts = 0;
         function tick(){
-            if(++attempts > 60){ reject(new Error('Превышено время ожидания (60 попыток).')); return; }
-            var reqs=[];
-            if(e1===null) reqs.push(post({action:'export_status',task_uuid:uuid1}).then(function(r){ if(r.status==='completed') e1=r.emails||[]; }));
-            if(e2===null) reqs.push(post({action:'export_status',task_uuid:uuid2}).then(function(r){ if(r.status==='completed') e2=r.emails||[]; }));
-            Promise.all(reqs).then(function(){
-                if(e1!==null&&e2!==null){ resolve([e1,e2]); return; }
-                loaderText.textContent = 'Ожидаем данные UniSender... ('+attempts+' сек)';
+            if (++attempts > maxAttempts){ reject(new Error('Превышено время ожидания ('+maxAttempts+' попыток).')); return; }
+            post({action:'export_status', task_uuid:uuid}).then(function(r){
+                if (r.status === 'completed'){ resolve(r.emails || []); return; }
+                if (onProgress) onProgress('Ожидаем данные UniSender... ('+attempts*3+' сек)');
                 sleep(3000).then(tick);
             }).catch(reject);
         }
