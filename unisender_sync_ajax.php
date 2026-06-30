@@ -100,7 +100,7 @@ try {
             }
             jsonOk(['status' => 'completed', 'emails' => $emails]);
         } elseif ($status === 'processing' || $status === 'queued' || $status === 'new' || $status === '') {
-            jsonOk(['status' => 'processing']);
+            jsonOk(['status' => 'processing', 'raw_status' => $status]);
         } else {
             throw new RuntimeException('Задача завершилась со статусом: ' . $status . '. ' . json_encode($resp['result'] ?? []));
         }

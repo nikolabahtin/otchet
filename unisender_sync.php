@@ -447,7 +447,7 @@ function pollOne(uuid, maxAttempts, onProgress){
             if (++attempts > maxAttempts){ reject(new Error('Превышено время ожидания ('+maxAttempts+' попыток).')); return; }
             post({action:'export_status', task_uuid:uuid}).then(function(r){
                 if (r.status === 'completed'){ resolve(r.emails || []); return; }
-                if (onProgress) onProgress('Ожидаем данные UniSender... ('+attempts*3+' сек)');
+                if (onProgress) onProgress('Ожидаем данные UniSender... ('+attempts*3+' сек, статус: '+(r.raw_status||'?')+')');
                 sleep(3000).then(tick);
             }).catch(reject);
         }
