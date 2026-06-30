@@ -81,14 +81,16 @@ try {
 
     } elseif ($action === 'add_to_list') {
         // Добавить контакты в выбранный список UniSender
+        // UniSender принимает список через поле 'Lists' в данных, не через 'list_ids'
         if ($listId === '') throw new RuntimeException('Не выбран список UniSender.');
         try {
             $resp   = $client->request('importContacts', [
                 'overwrite_tags'  => 0,
                 'overwrite_lists' => 0,
-                'field_names'     => $fieldNames,
-                'data'            => $data,
-                'list_ids'        => $listId,
+                'field_names'     => ['email', 'Lists'],
+                'data'            => array_map(static function(string $e) use ($listId): array {
+                    return [$e, $listId];
+                }, $emails),
             ]);
             if (isset($resp['error'])) {
                 throw new RuntimeException('UniSender importContacts: ' . $resp['error']);
