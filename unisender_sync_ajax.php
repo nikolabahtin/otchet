@@ -134,6 +134,20 @@ try {
             'total'    => count($emails),
         ]);
 
+    // ── 4. Создать новый список в UniSender ──────────────────────────────────
+    } elseif ($action === 'create_list') {
+        $title = trim((string)($_POST['title'] ?? ''));
+        if ($title === '') throw new RuntimeException('Введите название списка.');
+        $resp = $client->request('createList', ['title' => $title]);
+        if (isset($resp['error'])) {
+            throw new RuntimeException('UniSender createList: ' . $resp['error']);
+        }
+        $newId = (string)($resp['result']['id'] ?? '');
+        if ($newId === '') {
+            throw new RuntimeException('UniSender не вернул ID нового списка.');
+        }
+        jsonOk(['list' => ['id' => $newId, 'title' => $title]]);
+
     } else {
         throw new RuntimeException('Неизвестный action: ' . $action);
     }

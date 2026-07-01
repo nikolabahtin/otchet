@@ -133,6 +133,9 @@ $contactsJson  = json_encode($contactRows, JSON_UNESCAPED_UNICODE | JSON_UNESCAP
 .usync-list-item.active{border-color:#2357d6;background:#edf3ff}
 .usync-list-name{font-weight:700;font-size:12px}
 .usync-list-meta{color:#99a8bc;font-size:11px;margin-top:1px}
+.usync-list-add{border-style:dashed;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#99a8bc;min-height:48px}
+.usync-list-add:hover{border-color:#2357d6;color:#2357d6;background:#f5f8ff}
+.usync-list-add-icon{font-size:22px;font-weight:300;line-height:1}
 
 .usync-stats{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:7px;margin:0 0 14px}
 .usync-stat{border:1px solid #e4eaf2;background:#f8fafc;border-radius:5px;padding:9px 11px}
@@ -222,8 +225,28 @@ $contactsJson  = json_encode($contactRows, JSON_UNESCAPED_UNICODE | JSON_UNESCAP
             <div class="usync-list-meta">ID: <?= htmlspecialchars($lid) ?></div>
         </div>
         <?php endforeach; ?>
+        <!-- Плюс-тайл: создать новый список -->
+        <div class="usync-list-item usync-list-add" id="btnAddList" title="Создать новый список UniSender">
+            <div class="usync-list-add-icon">+</div>
+            <div class="usync-list-meta">Новый список</div>
+        </div>
     </div>
     <?php endif; ?>
+</div>
+
+<!-- Попап создания списка -->
+<div id="createListOverlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9999;align-items:center;justify-content:center;">
+    <div style="background:#fff;border-radius:8px;padding:28px 28px 22px;width:340px;box-shadow:0 8px 32px rgba(0,0,0,.18);position:relative;">
+        <div style="font-weight:700;font-size:16px;margin-bottom:16px;">Создать список UniSender</div>
+        <label style="font-size:13px;color:#45556d;display:block;margin-bottom:5px;">Название списка</label>
+        <input id="newListTitle" type="text" placeholder="Например: Клиенты GNC 2025"
+            style="width:100%;box-sizing:border-box;border:1px solid #d9e1ec;border-radius:5px;padding:8px 10px;font-size:14px;outline:none;margin-bottom:14px;">
+        <div id="createListError" style="color:#b91c1c;font-size:12px;margin-bottom:10px;display:none;"></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;">
+            <button class="usync-btn secondary" id="btnCreateListCancel" style="min-height:30px;padding:0 14px;font-size:13px;">Отмена</button>
+            <button class="usync-btn" id="btnCreateListSubmit" style="min-height:30px;padding:0 14px;font-size:13px;">Создать</button>
+        </div>
+    </div>
 </div>
 
 <?php if ($selectedListId !== ''): ?>
@@ -575,6 +598,83 @@ if(total>0 && selectedListId!=='') startExportCheck();
 else if(selectedListId!==''){
     setLoaderDone('Нет контактов с email по фильтру отчёта.');
     statsBlock.style.display='';
+}
+
+// ── Создание нового списка UniSender ──────────────────────────────────────
+var overlay   = document.getElementById('createListOverlay');
+var titleInput= document.getElementById('newListTitle');
+var createErr = document.getElementById('createListError');
+
+function openCreateListPopup(){
+    if (!overlay) return;
+    titleInput.value = '';
+    createErr.style.display = 'none';
+    overlay.style.display = 'flex';
+    setTimeout(function(){ titleInput.focus(); }, 50);
+}
+function closeCreateListPopup(){
+    if (overlay) overlay.style.display = 'none';
+}
+
+var btnAddList = document.getElementById('btnAddList');
+if (btnAddList) btnAddList.addEventListener('click', openCreateListPopup);
+
+var btnCancel = document.getElementById('btnCreateListCancel');
+if (btnCancel) btnCancel.addEventListener('click', closeCreateListPopup);
+
+// Закрыть по клику на фон
+if (overlay) overlay.addEventListener('click', function(e){
+    if (e.target === overlay) closeCreateListPopup();
+});
+
+// Enter в поле = отправка
+if (titleInput) titleInput.addEventListener('keydown', function(e){
+    if (e.key === 'Enter') submitCreateList();
+});
+
+var btnSubmit = document.getElementById('btnCreateListSubmit');
+if (btnSubmit) btnSubmit.addEventListener('click', submitCreateList);
+
+function submitCreateList(){
+    var title = titleInput ? titleInput.value.trim() : '';
+    if (!title){
+        createErr.textContent = 'Введите название списка.';
+        createErr.style.display = '';
+        return;
+    }
+    btnSubmit.classList.add('busy');
+    btnSubmit.innerHTML = '<span class="usync-spinner"></span> Создание...';
+    createErr.style.display = 'none';
+
+    post({action:'create_list', title:title}).then(function(r){
+        var lst = r.list;
+        // Добавляем новый тайл перед кнопкой "+"
+        var grid = document.querySelector('.usync-list-grid');
+        var addBtn = document.getElementById('btnAddList');
+        if (grid && addBtn) {
+            var tile = document.createElement('div');
+            tile.className = 'usync-list-item';
+            tile.setAttribute('data-list-id', lst.id);
+            tile.innerHTML = '<div class="usync-list-name">'+esc(lst.title)+'</div>' +
+                             '<div class="usync-list-meta">ID: '+esc(lst.id)+'</div>';
+            tile.addEventListener('click', function(){
+                var url = new URL(window.location.href);
+                url.searchParams.set('list_id', lst.id);
+                window.location.href = url.toString();
+            });
+            grid.insertBefore(tile, addBtn);
+        }
+        closeCreateListPopup();
+        // Сразу переходим к новому списку
+        var url = new URL(window.location.href);
+        url.searchParams.set('list_id', lst.id);
+        window.location.href = url.toString();
+    }).catch(function(err){
+        createErr.textContent = err.message;
+        createErr.style.display = '';
+        btnSubmit.classList.remove('busy');
+        btnSubmit.innerHTML = 'Создать';
+    });
 }
 
 })();
