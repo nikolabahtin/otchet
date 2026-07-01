@@ -537,7 +537,7 @@ function runSyncNext(){
             proc.synced++;
             updateRow(idx);
         });
-        proc.done+=batch.length; proc.offset+=proc.batchSize;
+        proc.done+=batch.length; proc.offset+=batch.length;
         updateCheckStats(); updateSyncStats(); updateSyncProgress();
         runSyncNext();
     }).catch(function(err){
@@ -548,7 +548,7 @@ function runSyncNext(){
             rowState[email].syncStatus='error'; rowState[email].syncMsg=err.message;
             proc.errors++; updateRow(idx);
         });
-        proc.done+=batch.length; proc.offset+=proc.batchSize;
+        proc.done+=batch.length; proc.offset+=batch.length;
         updateSyncStats(); runSyncNext();
     });
 }
