@@ -362,14 +362,21 @@ $filterOptions = new FilterOptions($filterId);
 $filterData = $filterOptions->getFilter([]);
 
 // Если фильтр пустой (новая сессия после выхода) но в шаблоне есть сохранённые значения —
-// восстанавливаем их в Bitrix FilterOptions так, чтобы и данные и UI фильтра совпадали.
+// восстанавливаем их как default_filter пресет чтобы и данные и UI фильтра совпадали.
 $savedTemplateFilter = is_array($config['filterValues'] ?? null) ? $config['filterValues'] : [];
 if (!empty($savedTemplateFilter) && empty(array_filter($filterData))) {
-    $filterOptions->setOptions(['filter' => $savedTemplateFilter]);
+    $existingPresets = $filterOptions->getPresets() ?: [];
+    $existingPresets['default_filter'] = [
+        'name'    => 'Основной',
+        'fields'  => $savedTemplateFilter,
+        'default' => true,
+    ];
+    $filterOptions->setPresets($existingPresets);
+    $filterOptions->setCurrentPreset('default_filter');
+    $filterOptions->save();
     $filterData = $filterOptions->getFilter([]);
     if (empty(array_filter($filterData))) {
-        // Fallback: если setOptions не сработал — применяем напрямую
-        $filterData = $savedTemplateFilter;
+        $filterData = $savedTemplateFilter; // fallback: применяем напрямую для данных
     }
 }
 
