@@ -361,6 +361,18 @@ $nav->allowAllRecords(true)->setPageSize($pageSize)->initFromUri();
 $filterOptions = new FilterOptions($filterId);
 $filterData = $filterOptions->getFilter([]);
 
+// Если фильтр пустой (новая сессия после выхода) но в шаблоне есть сохранённые значения —
+// восстанавливаем их в Bitrix FilterOptions так, чтобы и данные и UI фильтра совпадали.
+$savedTemplateFilter = is_array($config['filterValues'] ?? null) ? $config['filterValues'] : [];
+if (!empty($savedTemplateFilter) && empty(array_filter($filterData))) {
+    $filterOptions->setOptions(['filter' => $savedTemplateFilter]);
+    $filterData = $filterOptions->getFilter([]);
+    if (empty(array_filter($filterData))) {
+        // Fallback: если setOptions не сработал — применяем напрямую
+        $filterData = $savedTemplateFilter;
+    }
+}
+
 $saveFilterMessage = '';
 $saveFilterError = '';
 if (
@@ -724,13 +736,15 @@ if ($isExportExcel)
             <a class="ui-btn ui-btn-light-border" href="/local/otchet/index.php">Назад к шаблонам</a>
             <?php if (!empty($template['canEdit'])): ?>
             <a class="ui-btn ui-btn-light-border" href="/local/otchet/slider.php?id=<?=urlencode((string)$template['id'])?>">Корректировать шаблон</a>
+            <?php endif; ?>
+            <a class="ui-btn ui-btn-primary" id="exportExcelLink" href="/local/otchet/report.php?id=<?=urlencode((string)$template['id'])?>&export=excel">Выгрузить в Excel</a>
+            <?php if (!empty($template['canEdit'])): ?>
             <form method="post" action="<?=htmlspecialcharsbx((string)($_SERVER['REQUEST_URI'] ?? ''))?>" class="otchet-report2-save-filter-form">
                 <?=bitrix_sessid_post()?>
                 <input type="hidden" name="action" value="save_current_filter">
                 <button class="ui-btn ui-btn-success" type="submit">Сохранить фильтр в шаблон</button>
             </form>
             <?php endif; ?>
-            <a class="ui-btn ui-btn-primary" id="exportExcelLink" href="/local/otchet/report.php?id=<?=urlencode((string)$template['id'])?>&export=excel">Выгрузить в Excel</a>
             <?php
             $hasSavedFilter = !empty($config['filterValues']);
             if ($hasSavedFilter):
