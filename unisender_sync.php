@@ -393,9 +393,10 @@ function updateSyncStats(){
     $s('statErrors').textContent = proc.errors >= 0 ? proc.errors : '—';
 }
 
-// ── Шаг 1: Запрос двух async-экспортов из UniSender (независимо друг от друга) ──
-// scope=list — обычно быстро (десятки секунд), от него зависит кнопка синхронизации.
-// scope=all  — может быть долгим если в UniSender большая база, не блокирует работу со списком.
+// ── Шаг 1: Последовательная проверка UniSender ───────────────────────────
+// СНАЧАЛА список (маленький, быстрый) → потом вся база (большой, медленный).
+// Запускаем строго последовательно чтобы UniSender не ставил оба в очередь
+// одновременно и не было коллизий с порядком выполнения.
 function startExportCheck(){
     if (!total){ setLoaderDone('Контактов для синхронизации нет.'); return; }
 
@@ -403,40 +404,49 @@ function startExportCheck(){
     tableWrap.style.display  = '';
     renderTable();
 
-    loaderText.textContent = 'Проверяем выбранный список UniSender...';
+    // --- ШАГ 1: экспорт по выбранному списку ---
+    loaderText.textContent = 'Шаг 1/2: проверяем выбранный список UniSender...';
 
     post({action:'export_start', scope:'list', list_id:selectedListId}).then(function(r){
-        return pollOne(r.task_uuid, 80, function(msg){ loaderText.textContent = msg; });
+        return pollOne(r.task_uuid, 100, function(msg){
+            loaderText.textContent = 'Шаг 1/2: список — ' + msg;
+        });
     }).then(function(emails){
         listEmailSet = new Set(emails);
         contacts.forEach(function(c){ rowState[c.email].inList = listEmailSet.has(c.email); });
-        setLoaderDone(null);
+        setLoaderDone(null);   // убираем спиннер над статистикой
         updateCheckStats();
         renderTable();
+
+        // --- ШАГ 2: экспорт всей базы UniSender (только после завершения шага 1) ---
+        var usNote = document.createElement('div');
+        usNote.className = 'usync-note';
+        usNote.style.marginBottom = '8px';
+        usNote.textContent = 'Шаг 2/2: проверяем всю базу UniSender...';
+        statsBlock.parentNode.insertBefore(usNote, statsBlock);
+
+        post({action:'export_start', scope:'all', list_id:selectedListId}).then(function(r){
+            return pollOne(r.task_uuid, 200, function(msg){
+                usNote.textContent = 'Шаг 2/2: база — ' + msg;
+            });
+        }).then(function(emails){
+            usEmailSet = new Set(emails);
+            contacts.forEach(function(c){ rowState[c.email].exists = usEmailSet.has(c.email); });
+            usNote.remove();
+            updateCheckStats();
+            renderTable();
+        }).catch(function(err){
+            usNote.className = 'usync-alert';
+            usNote.textContent = 'Проверка всей базы UniSender не удалась: ' + err.message +
+                '. Колонка "В UniSender" может быть неактуальна.';
+        });
+
     }).catch(function(err){
-        checkLoader.innerHTML = '<span style="color:#b91c1c;font-size:13px">Ошибка проверки списка: '+esc(err.message)+'</span>';
+        checkLoader.innerHTML = '<span style="color:#b91c1c;font-size:13px">Ошибка проверки списка UniSender: '+esc(err.message)+'</span>';
+        // Разблокируем таблицу — пусть работают с тем что есть
         contacts.forEach(function(c){ rowState[c.email].inList = false; });
         updateCheckStats();
         renderTable();
-    });
-
-    // Полная проверка базы UniSender — отдельно, медленнее, не блокирует кнопку
-    var usLoaderNote = document.createElement('div');
-    usLoaderNote.className = 'usync-note';
-    usLoaderNote.textContent = 'Проверяем всю базу UniSender (может занять несколько минут)...';
-    statsBlock.parentNode.insertBefore(usLoaderNote, statsBlock);
-
-    post({action:'export_start', scope:'all', list_id:selectedListId}).then(function(r){
-        return pollOne(r.task_uuid, 200, function(msg){ usLoaderNote.textContent = msg; });
-    }).then(function(emails){
-        usEmailSet = new Set(emails);
-        contacts.forEach(function(c){ rowState[c.email].exists = usEmailSet.has(c.email); });
-        usLoaderNote.remove();
-        updateCheckStats();
-        renderTable();
-    }).catch(function(err){
-        usLoaderNote.className = 'usync-alert';
-        usLoaderNote.textContent = 'Не удалось проверить всю базу UniSender: '+err.message+'. Колонка "В UniSender" может быть неточной для контактов вне списка.';
     });
 }
 
