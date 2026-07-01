@@ -226,7 +226,7 @@ $contactsJson  = json_encode($contactRows, JSON_UNESCAPED_UNICODE | JSON_UNESCAP
         </div>
         <?php endforeach; ?>
         <!-- Плюс-тайл: создать новый список -->
-        <div class="usync-list-item usync-list-add" id="btnAddList" title="Создать новый список UniSender">
+        <div class="usync-list-add" id="btnAddList" title="Создать новый список UniSender">
             <div class="usync-list-add-icon">+</div>
             <div class="usync-list-meta">Новый список</div>
         </div>
@@ -584,11 +584,13 @@ if(btnStop) btnStop.addEventListener('click', function(){
     finishSync('остановлена пользователем');
 });
 
-// Выбор списка
-document.querySelectorAll('.usync-list-item').forEach(function(el){
+// Выбор списка — только тайлы с data-list-id
+document.querySelectorAll('.usync-list-item[data-list-id]').forEach(function(el){
     el.addEventListener('click', function(){
+        var lid = el.getAttribute('data-list-id');
+        if (!lid) return;
         var url=new URL(window.location.href);
-        url.searchParams.set('list_id', el.getAttribute('data-list-id'));
+        url.searchParams.set('list_id', lid);
         window.location.href=url.toString();
     });
 });
